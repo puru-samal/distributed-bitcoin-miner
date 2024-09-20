@@ -6,17 +6,19 @@ import (
 
 func TestPriorityQueue(t *testing.T) {
 	// Test for inserting elements and retrieving the minimum
+	connID := 0
+	dummyPayload := make([]byte, 3)
 	pq := NewPQ()
-	pq.Insert(5)
-	pq.Insert(3)
-	pq.Insert(8)
-	pq.Insert(1)
+	pq.Insert(NewData(connID, 5, len(dummyPayload), dummyPayload, 0))
+	pq.Insert(NewData(connID, 3, len(dummyPayload), dummyPayload, 0))
+	pq.Insert(NewData(connID, 8, len(dummyPayload), dummyPayload, 0))
+	pq.Insert(NewData(connID, 1, len(dummyPayload), dummyPayload, 0))
 
 	min, err := pq.GetMin()
 	if err != nil {
 		t.Fatalf("Error occurred: %v", err)
 	}
-	if min != 1 {
+	if min.SeqNum != 1 {
 		t.Errorf("Expected min to be 1, but got %d", min)
 	}
 
@@ -25,7 +27,7 @@ func TestPriorityQueue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error occurred: %v", err)
 	}
-	if removedMin != 1 {
+	if removedMin.SeqNum != 1 {
 		t.Errorf("Expected removed min to be 1, but got %d", removedMin)
 	}
 
@@ -34,7 +36,7 @@ func TestPriorityQueue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error occurred: %v", err)
 	}
-	if min != 3 {
+	if min.SeqNum != 3 {
 		t.Errorf("Expected min to be 3, but got %d", min)
 	}
 
@@ -50,12 +52,12 @@ func TestPriorityQueue(t *testing.T) {
 	}
 
 	// Test inserting and removing from an empty queue
-	pq.Insert(10)
+	pq.Insert(NewData(connID, 10, len(dummyPayload), dummyPayload, 0))
 	min, err = pq.GetMin()
 	if err != nil {
 		t.Fatalf("Error occurred: %v", err)
 	}
-	if min != 10 {
+	if min.SeqNum != 10 {
 		t.Errorf("Expected min to be 10, but got %d", min)
 	}
 }
@@ -80,7 +82,10 @@ func TestMultipleInserts(t *testing.T) {
 	pq := NewPQ()
 
 	for i := 10; i >= 1; i-- {
-		pq.Insert(i)
+		connID := 0
+		dummyPayload := make([]byte, 3)
+		msg := NewData(connID, i, len(dummyPayload), dummyPayload, 0)
+		pq.Insert(msg)
 	}
 
 	for i := 1; i <= 10; i++ {
@@ -88,7 +93,7 @@ func TestMultipleInserts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Error occurred: %v", err)
 		}
-		if min != i {
+		if min.SeqNum != i {
 			t.Errorf("Expected min to be %d, but got %d", i, min)
 		}
 

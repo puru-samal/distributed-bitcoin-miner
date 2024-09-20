@@ -3,12 +3,12 @@ package lsp
 import "fmt"
 
 type priorityQueue struct {
-	q []int
+	q []*Message
 }
 
 func NewPQ() *priorityQueue {
 	newQueue := &priorityQueue{
-		q: make([]int, 0),
+		q: make([]*Message, 0),
 	}
 	return newQueue
 }
@@ -42,11 +42,11 @@ func (pq *priorityQueue) MinHeapifyDown(idx int) {
 	rightChild := pq.RightChild(idx)
 	min_idx := idx
 
-	if pq.isValidIdx(leftChild) && pq.q[min_idx] > pq.q[leftChild] {
+	if pq.isValidIdx(leftChild) && pq.q[min_idx].SeqNum > pq.q[leftChild].SeqNum {
 		min_idx = leftChild
 	}
 
-	if pq.isValidIdx(rightChild) && pq.q[min_idx] > pq.q[rightChild] {
+	if pq.isValidIdx(rightChild) && pq.q[min_idx].SeqNum > pq.q[rightChild].SeqNum {
 		min_idx = rightChild
 	}
 
@@ -68,7 +68,7 @@ func (pq *priorityQueue) MinHeapifyUp(idx int) {
 	parent := pq.Parent(idx)
 	max_idx := idx
 
-	if pq.isValidIdx(parent) && pq.q[max_idx] < pq.q[parent] {
+	if pq.isValidIdx(parent) && pq.q[max_idx].SeqNum < pq.q[parent].SeqNum {
 		max_idx = parent
 	}
 
@@ -81,23 +81,23 @@ func (pq *priorityQueue) MinHeapifyUp(idx int) {
 
 }
 
-func (pq *priorityQueue) Insert(elem int) {
+func (pq *priorityQueue) Insert(elem *Message) {
 	pq.q = append(pq.q, elem)
 	pq.MinHeapifyUp(len(pq.q) - 1)
 }
 
-func (pq *priorityQueue) GetMin() (int, error) {
+func (pq *priorityQueue) GetMin() (*Message, error) {
 	if len(pq.q) == 0 {
-		return 0, fmt.Errorf("priority queue is empty")
+		return nil, fmt.Errorf("priority queue is empty")
 	}
 	return pq.q[0], nil
 }
 
-func (pq *priorityQueue) RemoveMin() (int, error) {
+func (pq *priorityQueue) RemoveMin() (*Message, error) {
 
 	min, err := pq.GetMin()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	pq.q[0] = pq.q[len(pq.q)-1]
