@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/cmu440/lspnet"
 )
@@ -16,39 +17,56 @@ type server struct {
 	clientInfo       map[int]*clientInfo
 	nextConnectionID int
 
+	// Channels to read and write messages to/from clients
 	incomingMsgChan   chan *clientMessage
 	readRequestChan   chan bool
 	readResponseChan  chan *readResponse
 	writeRequestChan  chan *clientWriteRequest
 	writeResponseChan chan error
 
+	// Channels for closing connection w/ client
 	closeConnRequestChan  chan int
 	closeConnResponseChan chan error
 	removeClientChan      chan int
 
+	// Channels for server close
 	isClosed             bool
 	serverShutdownChan   chan bool
 	shutdownCompleteChan chan bool
 	connectionLostChan   chan bool
 }
 
+// clientMessage contains a message and the address of the client that sent it
 type clientMessage struct {
 	message *Message
 	addr    *lspnet.UDPAddr
 }
 
+// clientWriteRequest contains the connection ID and payload to be sent to a client
 type clientWriteRequest struct {
 	connID  int
 	payload []byte
 }
 
+// readResponse contains the connection ID and payload to be read by the client
 type readResponse struct {
 	connID  int
 	payload []byte
 }
 
+// clientInfo contains information about a client
 type clientInfo struct {
-	addr            *lspnet.UDPAddr
+	addr           *lspnet.UDPAddr
+	pendingPayload map[int][]byte
+
+	// Sequence numbers for reading and writing
+	readSeqNum  int
+	writeSeqNum int
+
+	unAckedMsgs []*Message
+	pendingMsgs []*Message
+
+	// variables to keep track of whether the client has received or sent data
 	hasReceivedData bool
 	hasSentData     bool
 	closed          bool
@@ -91,20 +109,89 @@ func NewServer(port int, params *Params) (Server, error) {
 		shutdownCompleteChan: make(chan bool),
 		connectionLostChan:   make(chan bool),
 	}
+
 	go server.handleIncomingMessages()
-	go server.monitorDisconnectedClients()
+
 	go server.serverMain()
+
+	go server.monitorDisconnectedClients()
 
 	return server, nil
 }
 
-func (s *server) handleIncomingMessages() {
+func (s *server) serverMain() {
+	shuttingDown := false
 
+	for {
+		select {
+		case clientMsg := <-s.incomingMsgChan:
+			messageType := clientMsg.message.Type
+			clientAddr := clientMsg.addr
+			connId := clientMsg.message.ConnID
+			switch messageType {
+			case MsgConnect:
+				alreadyConnected := s.checkConnection(clientMsg, clientAddr)
+				if alreadyConnected {
+					continue
+				}
+			case MsgData:
+				s.DataHandler(clientMsg, clientAddr, connId)
+
+			case MsgAck:
+				acknowledged := s.AckHandler(clientMsg, connId, shuttingDown)
+				if acknowledged {
+					return
+				}
+			case MsgCAck:
+				//s.CAckHandler(clientMsg)
+				return
+			}
+			if client, ok := s.clientInfo[connId]; ok {
+				client.hasReceivedData = true
+			}
+
+		case <-s.readRequestChan:
+			s.readRequest()
+
+		case writeMsg := <-s.writeRequestChan:
+			s.writeRequest(writeMsg)
+
+		case id := <-s.removeClientChan:
+			delete(s.clientInfo, id)
+
+		case id := <-s.closeConnRequestChan:
+			client, ok := s.clientInfo[id]
+			if !ok || client.closed {
+				s.closeConnResponseChan <- errors.New("Connection not found")
+			} else {
+				client.closed = true
+				s.closeConnResponseChan <- nil
+			}
+
+		case <-s.serverShutdownChan:
+			shuttingDown = true
+			for connId, client := range s.clientInfo {
+				if client.closed || (len(client.pendingMsgs) == 0 && len(client.unAckedMsgs) == 0) {
+					delete(s.clientInfo, connId)
+				}
+			}
+			if len(s.clientInfo) == 0 {
+				s.shutdownCompleteChan <- true
+				return
+			}
+
+		default:
+			s.defaultActions()
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func (s *server) handleIncomingMessages() {
 	buffer := make([]byte, 1024)
 
 	for {
 		n, addr, err := s.conn.ReadFromUDP(buffer)
-		fmt.Printf("[Server] Receive Message: %v\n", n)
 		if err != nil {
 			continue
 		}
@@ -131,15 +218,16 @@ func (s *server) monitorDisconnectedClients() {
 }
 
 func (s *server) Read() (int, []byte, error) {
-	// TODO: remove this line when you are ready to begin implementing this method.
+	fmt.Println("Read called")
 	for {
 		s.readRequestChan <- true
-		readRes := <-s.readResponseChan
-		if readRes.payload != nil {
+		if readRes := <-s.readResponseChan; readRes.payload != nil {
 			return readRes.connID, readRes.payload, nil
-		} else if s.isClosed {
+		} else if readRes.connID != -1 {
+			s.removeClientChan <- readRes.connID
 			return -1, nil, errors.New("Server is closed")
 		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
