@@ -18,6 +18,22 @@ const (
 	Active                     // Active State
 )
 
+type InternalType int
+
+const (
+	Read InternalType = iota
+	Write
+	ID
+	Close
+)
+
+type internalRequest struct {
+	rType   InternalType
+	payload []byte
+	err     error
+	id      int
+}
+
 type client struct {
 	// general
 	state      ClientState
@@ -26,6 +42,10 @@ type client struct {
 
 	// NewClient
 	closeNewClient chan bool
+
+	// Read | Write | ConnID
+	processInternal chan *internalRequest
+	getInternal     chan *internalRequest
 
 	connID        int
 	getConnID     chan int
@@ -71,23 +91,24 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	}
 
 	c := &client{
-		state:          Connect,
-		serverAddr:     serverAddr,
-		clientConn:     conn,
-		closeNewClient: make(chan bool),
-		connID:         0,
-		getConnID:      make(chan int),
-		params:         params,
-		counter:        0,
-		updateCounter:  make(chan int),
-		closeConn:      make(chan int),
-		msgSendChan:    make(chan *Message),
-		msgRecvChan:    make(chan *Message),
-		msgMap:         make(map[int]*Message),
-		mapLB:          initialSeqNum,
-		mapUB:          initialSeqNum + 1,
-		maxSize:        1,
-		currSn:         0,
+		state:           Connect,
+		serverAddr:      serverAddr,
+		clientConn:      conn,
+		closeNewClient:  make(chan bool),
+		processInternal: make(chan *internalRequest),
+		connID:          0,
+		getConnID:       make(chan int),
+		params:          params,
+		counter:         0,
+		updateCounter:   make(chan int),
+		closeConn:       make(chan int),
+		msgSendChan:     make(chan *Message),
+		msgRecvChan:     make(chan *Message),
+		msgMap:          make(map[int]*Message),
+		mapLB:           initialSeqNum,
+		mapUB:           initialSeqNum + 1,
+		maxSize:         1,
+		currSn:          0,
 	}
 
 	// Launch Main Routine
@@ -109,28 +130,33 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 }
 
 func (c *client) ConnID() int {
-	return -1
+	c.processInternal <- &internalRequest{rType: ID}
+	req := <-c.getInternal
+	return req.id
 }
 
 func (c *client) Read() ([]byte, error) {
 	// TODO: remove this line when you are ready to begin implementing this method.
-	select {} // Blocks indefinitely.
-	return nil, errors.New("not yet implemented")
+	c.processInternal <- &internalRequest{rType: Read}
+	req := <-c.getInternal
+	return req.payload, req.err
 }
 
 func (c *client) Write(payload []byte) error {
-	return errors.New("not yet implemented")
+	c.processInternal <- &internalRequest{rType: Write}
+	req := <-c.getInternal
+	return req.err
 }
 
 func (c *client) Close() error {
-	return errors.New("not yet implemented")
+	c.processInternal <- &internalRequest{rType: Close}
+	req := <-c.getInternal
+	return req.err
 }
 
 func (c *client) main() {
 	for {
 		select {
-		case <-c.closeConn:
-			return
 		case msg := <-c.msgSendChan:
 			// Check if msg allowable by sliding window protocol
 			// Check if mapSize < (1 (Connect) || MaxUnackedMessages)
