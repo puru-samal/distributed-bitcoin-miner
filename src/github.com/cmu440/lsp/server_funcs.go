@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/cmu440/lspnet"
 )
@@ -101,8 +102,9 @@ func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) 
 }
 
 func (s *server) readRequest() {
-
 	for id, client := range s.clientInfo {
+		res, ok := client.pendingPayload[client.readSeqNum]
+
 		if client.closed && len(client.pendingPayload) == 0 {
 			readRes := &readResponse{
 				connID:  id,
@@ -110,7 +112,7 @@ func (s *server) readRequest() {
 			}
 			s.readResponseChan <- readRes
 			return
-		} else if res, ok := client.pendingPayload[client.readSeqNum]; ok {
+		} else if ok {
 			readRes := &readResponse{
 				connID:  id,
 				payload: res,
@@ -127,12 +129,12 @@ func (s *server) readRequest() {
 	}
 	s.readResponseChan <- readRes
 	return
-
 }
-func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 
-	if client, ok := s.clientInfo[writeMsg.connID]; !ok || client.closed {
-		s.writeResponseChan <- errors.New("Connection not found")
+func (s *server) writeRequest(writeMsg *clientWriteRequest) {
+	client, ok := s.clientInfo[writeMsg.connID]
+	if !ok || client.closed {
+		s.writeResponseChan <- errors.New("connection not found")
 	} else {
 		checkSum := CalculateChecksum(writeMsg.connID, client.writeSeqNum, len(writeMsg.payload), writeMsg.payload)
 		newDataMessage := NewData(writeMsg.connID, client.writeSeqNum, len(writeMsg.payload), writeMsg.payload, checkSum)
@@ -172,7 +174,7 @@ func (s *server) defaultActions() {
 			if client.validMessage(item.SeqNum, s.params) {
 				err := s.sendMessage(item, client.addr)
 				if err != nil {
-					fmt.Println(err)
+					log.Println(err)
 				}
 				client.unAckedMsgs = append(client.unAckedMsgs, item)
 			} else {

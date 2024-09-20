@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/cmu440/lspnet"
@@ -119,6 +120,7 @@ func NewServer(port int, params *Params) (Server, error) {
 	return server, nil
 }
 
+// serverMain is the main function for the server. It handles all incoming messages
 func (s *server) serverMain() {
 	shuttingDown := false
 
@@ -187,6 +189,7 @@ func (s *server) serverMain() {
 	}
 }
 
+// handleIncomingMessages reads incoming messages from clients and signals them to the server
 func (s *server) handleIncomingMessages() {
 	buffer := make([]byte, 1024)
 
@@ -208,6 +211,7 @@ func (s *server) handleIncomingMessages() {
 	}
 }
 
+// monitorDisconnectedClients monitors the connectionLostChan for disconnected clients
 func (s *server) monitorDisconnectedClients() {
 	for {
 		select {
@@ -217,20 +221,22 @@ func (s *server) monitorDisconnectedClients() {
 	}
 }
 
+// Read reads a message from a client. If the server is closed, it returns an error
 func (s *server) Read() (int, []byte, error) {
-	fmt.Println("Read called")
+	log.Println("Read Called")
 	for {
 		s.readRequestChan <- true
 		if readRes := <-s.readResponseChan; readRes.payload != nil {
 			return readRes.connID, readRes.payload, nil
 		} else if readRes.connID != -1 {
 			s.removeClientChan <- readRes.connID
-			return -1, nil, errors.New("Server is closed")
+			return -1, nil, errors.New("server is closed")
 		}
 		time.Sleep(time.Millisecond)
 	}
 }
 
+// Write writes a message to a client. If the server is closed, it returns an error
 func (s *server) Write(connId int, payload []byte) error {
 	writeMsg := &clientWriteRequest{
 		connID:  connId,
@@ -240,11 +246,13 @@ func (s *server) Write(connId int, payload []byte) error {
 	return <-s.writeResponseChan
 }
 
+// CloseConn closes a connection with a client of the given connection ID
 func (s *server) CloseConn(connId int) error {
 	s.closeConnRequestChan <- connId
 	return <-s.closeConnResponseChan
 }
 
+// Close closes the server
 func (s *server) Close() error {
 	defer s.conn.Close()
 	s.isClosed = true
