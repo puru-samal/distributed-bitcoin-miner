@@ -100,3 +100,21 @@ func (pq *priorityQueue) minHeapifyUp(idx int) {
 		pq.minHeapifyUp(max_idx)
 	}
 }
+
+func (pq *priorityQueue) Remove(seqNum int) bool {
+	index := -1
+	newPQ := pq.q
+	for i := range newPQ {
+		if newPQ[i].SeqNum == seqNum {
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		return false
+	}
+	pq.q[index] = pq.q[len(pq.q)-1]
+	pq.q = pq.q[:len(pq.q)-1]
+	pq.MinHeapifyDown(index)
+	return true
+}

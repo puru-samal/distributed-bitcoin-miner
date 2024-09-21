@@ -64,8 +64,8 @@ type clientInfo struct {
 	readSeqNum  int
 	writeSeqNum int
 
-	unAckedMsgs []*Message
-	pendingMsgs []*Message
+	unAckedMsgs *priorityQueue
+	pendingMsgs *priorityQueue
 
 	// variables to keep track of whether the client has received or sent data
 	hasReceivedData bool
@@ -173,7 +173,7 @@ func (s *server) serverMain() {
 		case <-s.serverShutdownChan:
 			shuttingDown = true
 			for connId, client := range s.clientInfo {
-				if client.closed || (len(client.pendingMsgs) == 0 && len(client.unAckedMsgs) == 0) {
+				if client.closed || (len(client.pendingMsgs.q) == 0 && len(client.unAckedMsgs.q) == 0) {
 					delete(s.clientInfo, connId)
 				}
 			}
@@ -184,7 +184,6 @@ func (s *server) serverMain() {
 
 		default:
 			s.defaultActions()
-			time.Sleep(time.Millisecond)
 		}
 	}
 }
@@ -201,6 +200,7 @@ func (s *server) handleIncomingMessages() {
 		var msg Message
 		err = json.Unmarshal(buffer[:n], &msg)
 		if err != nil {
+			log.Println("Error unmarshalling message")
 			continue
 		}
 		clientMsg := &clientMessage{
