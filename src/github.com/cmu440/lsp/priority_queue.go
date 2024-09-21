@@ -17,7 +17,7 @@ func NewPQ() *priorityQueue {
 
 func (pq *priorityQueue) Insert(elem *Message) {
 	pq.q = append(pq.q, elem)
-	pq.MinHeapifyUp(len(pq.q) - 1)
+	pq.minHeapifyUp(len(pq.q) - 1)
 }
 
 func (pq *priorityQueue) GetMin() (*Message, error) {
@@ -34,8 +34,12 @@ func (pq *priorityQueue) RemoveMin() (*Message, error) {
 	}
 	pq.q[0] = pq.q[len(pq.q)-1]
 	pq.q = pq.q[:len(pq.q)-1]
-	pq.MinHeapifyDown(0)
+	pq.minHeapifyDown(0)
 	return min, nil
+}
+
+func (pq *priorityQueue) Empty() bool {
+	return len(pq.q) == 0
 }
 
 /** internal helpers **/
@@ -44,55 +48,55 @@ func (pq *priorityQueue) isValidIdx(idx int) bool {
 	return (0 <= idx) && (idx < len(pq.q))
 }
 
-func (pq *priorityQueue) Parent(idx int) int {
+func (pq *priorityQueue) parent(idx int) int {
 	new_idx := (idx - 1) >> 1
 	return new_idx
 }
 
-func (pq *priorityQueue) LeftChild(idx int) int {
+func (pq *priorityQueue) leftChild(idx int) int {
 	new_idx := (idx << 1) + 1
 	return new_idx
 }
 
-func (pq *priorityQueue) RightChild(idx int) int {
+func (pq *priorityQueue) rightChild(idx int) int {
 	new_idx := (idx << 1) + 2
 	return new_idx
 }
 
-func (pq *priorityQueue) MinHeapifyDown(idx int) {
+func (pq *priorityQueue) minHeapifyDown(idx int) {
 	if !pq.isValidIdx(idx) {
 		return
 	}
-	leftChild := pq.LeftChild(idx)
-	rightChild := pq.RightChild(idx)
+	lch := pq.leftChild(idx)
+	rch := pq.rightChild(idx)
 	min_idx := idx
-	if pq.isValidIdx(leftChild) && pq.q[min_idx].SeqNum > pq.q[leftChild].SeqNum {
-		min_idx = leftChild
+	if pq.isValidIdx(lch) && pq.q[min_idx].SeqNum > pq.q[lch].SeqNum {
+		min_idx = lch
 	}
-	if pq.isValidIdx(rightChild) && pq.q[min_idx].SeqNum > pq.q[rightChild].SeqNum {
-		min_idx = rightChild
+	if pq.isValidIdx(rch) && pq.q[min_idx].SeqNum > pq.q[rch].SeqNum {
+		min_idx = rch
 	}
 	if min_idx != idx {
 		tmp := pq.q[idx]
 		pq.q[idx] = pq.q[min_idx]
 		pq.q[min_idx] = tmp
-		pq.MinHeapifyDown(min_idx)
+		pq.minHeapifyDown(min_idx)
 	}
 }
 
-func (pq *priorityQueue) MinHeapifyUp(idx int) {
+func (pq *priorityQueue) minHeapifyUp(idx int) {
 	if !pq.isValidIdx(idx) {
 		return
 	}
-	parent := pq.Parent(idx)
+	p := pq.parent(idx)
 	max_idx := idx
-	if pq.isValidIdx(parent) && pq.q[max_idx].SeqNum < pq.q[parent].SeqNum {
-		max_idx = parent
+	if pq.isValidIdx(p) && pq.q[max_idx].SeqNum < pq.q[p].SeqNum {
+		max_idx = p
 	}
 	if max_idx != idx {
 		tmp := pq.q[idx]
 		pq.q[idx] = pq.q[max_idx]
 		pq.q[max_idx] = tmp
-		pq.MinHeapifyUp(max_idx)
+		pq.minHeapifyUp(max_idx)
 	}
 }
