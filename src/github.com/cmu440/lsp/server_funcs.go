@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/cmu440/lspnet"
 )
@@ -49,15 +48,14 @@ func (s *server) checkConnection(clientMsg *clientMessage, clientAddr *lspnet.UD
 	newAck := NewAck(s.nextConnectionID, clientMsg.message.SeqNum)
 	err := s.sendMessage(newAck, clientAddr)
 
-	fmt.Println("New connection")
-
 	if err != nil {
-		fmt.Println("Error sending message")
+		fmt.Println("Error while sending message")
 		fmt.Println(err)
 	}
 	newClient.writeSeqNum += 1
 	s.nextConnectionID += 1
 
+	log.Println("New connection")
 	return false
 }
 
@@ -65,7 +63,8 @@ func (s *server) DataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAdd
 	payload := clientMsg.message.Payload
 	checkSum := CalculateChecksum(connID, clientMsg.message.SeqNum, len(payload), payload)
 	if clientMsg.message.Size > len(payload) || (clientMsg.message.Size == len(payload) && checkSum != clientMsg.message.Checksum) {
-		if client, ok := s.clientInfo[connID]; ok {
+		client, ok := s.clientInfo[connID]
+		if ok {
 			client.hasReceivedData = true
 		}
 		return
@@ -73,17 +72,16 @@ func (s *server) DataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAdd
 	// truncate the payload
 	clientMsg.message.Payload = clientMsg.message.Payload[:clientMsg.message.Size]
 
-	fmt.Println("Data Received: ", clientMsg.message)
-
 	client := s.clientInfo[connID]
 	client.pendingPayload[clientMsg.message.SeqNum] = clientMsg.message.Payload
 	ack := NewAck(connID, clientMsg.message.SeqNum)
 	err := s.sendMessage(ack, clientAddr)
+
 	if err != nil {
 		log.Println(err)
 	}
 	client.hasSentData = true
-
+	log.Println("[Server to Client] Data Sent: ", ack, err)
 }
 
 func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) bool {
@@ -103,6 +101,7 @@ func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) 
 			acknowledged = true
 		}
 	}
+	log.Println("[Server to Client] Acknowledged Sent")
 	return acknowledged
 }
 
@@ -125,6 +124,7 @@ func (s *server) readRequest() {
 			delete(client.pendingPayload, client.readSeqNum)
 			client.readSeqNum += 1
 			s.readResponseChan <- readRes
+			log.Println("Read Response Sent:", readRes)
 			return
 		}
 	}
@@ -143,18 +143,11 @@ func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 	} else {
 		checkSum := CalculateChecksum(writeMsg.connID, client.writeSeqNum, len(writeMsg.payload), writeMsg.payload)
 		newDataMessage := NewData(writeMsg.connID, client.writeSeqNum, len(writeMsg.payload), writeMsg.payload, checkSum)
-
-		fmt.Println("New Data Message:", newDataMessage)
 		client.pendingMsgs.Insert(newDataMessage)
-		// // send pending messages to the client
-		// for _, msg := range client.pendingMsgs {
-		// 	err := s.sendMessage(msg, client.addr)
-		// 	if err != nil {
-		// 		fmt.Println(err)
-		// 	}
-		// }
+
 		client.writeSeqNum += 1
 		s.writeResponseChan <- nil
+		log.Println("Write Response Sent: " + string(writeMsg.payload))
 	}
 }
 
@@ -175,11 +168,13 @@ func (s *server) defaultActions() {
 					log.Println(err)
 				}
 				client.unAckedMsgs.Insert(item)
+				log.Println("[Server to Client] Data Sent: ", item)
 			} else {
 				client.pendingMsgs.Insert(item)
+				log.Println("[Server to Client] Data Not Sent: ", item)
 			}
 		}
 	}
-	time.Sleep(time.Millisecond)
+	//time.Sleep(time.Millisecond)
 
 }
