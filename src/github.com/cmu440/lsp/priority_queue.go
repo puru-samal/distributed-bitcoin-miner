@@ -115,6 +115,6 @@ func (pq *priorityQueue) Remove(seqNum int) bool {
 	}
 	pq.q[index] = pq.q[len(pq.q)-1]
 	pq.q = pq.q[:len(pq.q)-1]
-	pq.MinHeapifyDown(index)
+	pq.minHeapifyDown(index)
 	return true
 }

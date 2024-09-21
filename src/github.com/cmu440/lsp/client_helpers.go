@@ -2,14 +2,12 @@ package lsp
 
 import (
 	"encoding/json"
-	"log"
 
 	"github.com/cmu440/lspnet"
 )
 
 func sendToServer(conn *lspnet.UDPConn, msg *Message) {
 	byt, err := json.Marshal(msg)
-	log.Println("Unhandled: MsgData")
 	if err == nil {
 		conn.Write(byt)
 	}

@@ -5,6 +5,7 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -27,11 +28,12 @@ const (
 	Close
 )
 
-type internalRequest struct {
-	rType   InternalType
+type internalMsg struct {
+	mtype   InternalType
 	payload []byte
 	err     error
 	id      int
+	msg     *Message
 }
 
 type client struct {
@@ -48,10 +50,14 @@ type client struct {
 	returnAll       chan int
 
 	// Read | Write | ConnID
-	processInternal chan *internalRequest
-	getInternal     chan *internalRequest
+	processRead      bool
+	readReturnChan   chan *internalMsg
+	connIDReturnChan chan *internalMsg
+	writeReturnChan  chan *internalMsg
+	closeReturnChan  chan *internalMsg
+	processInternal  chan *internalMsg
 
-	// timing
+	// TODO: timing
 	counter       int
 	updateCounter chan int
 
@@ -103,8 +109,12 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		returnNewClient: make(chan int),
 		returnAll:       make(chan int),
 
-		processInternal: make(chan *internalRequest),
-		getInternal:     make(chan *internalRequest),
+		processRead:      false,
+		readReturnChan:   make(chan *internalMsg),
+		writeReturnChan:  make(chan *internalMsg),
+		connIDReturnChan: make(chan *internalMsg),
+		closeReturnChan:  make(chan *internalMsg),
+		processInternal:  make(chan *internalMsg),
 
 		counter:       0,
 		updateCounter: make(chan int),
@@ -136,27 +146,31 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 }
 
 func (c *client) ConnID() int {
-	c.processInternal <- &internalRequest{rType: ID}
-	req := <-c.getInternal
+	log.Printf("Client ConnID\n")
+	c.processInternal <- &internalMsg{mtype: ID}
+	req := <-c.connIDReturnChan
 	return req.id
 }
 
 func (c *client) Read() ([]byte, error) {
-	// TODO: remove this line when you are ready to begin implementing this method.
-	c.processInternal <- &internalRequest{rType: Read}
-	req := <-c.getInternal
-	return req.payload, req.err
+	log.Printf("Client Read\n")
+	c.processInternal <- &internalMsg{mtype: Read}
+	req := <-c.readReturnChan
+	c.msgSendChan <- NewAck(c.connID, req.msg.SeqNum)
+	return req.msg.Payload, req.err
 }
 
 func (c *client) Write(payload []byte) error {
-	c.processInternal <- &internalRequest{rType: Write}
-	req := <-c.getInternal
-	return req.err
+	log.Printf("Client Write\n")
+	c.processInternal <- &internalMsg{mtype: Write, payload: payload}
+	resp := <-c.writeReturnChan
+	c.msgSendChan <- resp.msg
+	return resp.err
 }
 
 func (c *client) Close() error {
-	c.processInternal <- &internalRequest{rType: Close}
-	req := <-c.getInternal
+	c.processInternal <- &internalMsg{mtype: Close}
+	req := <-c.closeReturnChan
 	return req.err
 }
 
@@ -166,7 +180,7 @@ func (c *client) main() {
 		case <-c.returnAll:
 			return
 		case msg := <-c.msgSendChan:
-			log.Printf("to send msg: %s| state: %s\n", cStateString(c.state), msg)
+			log.Printf("to send msg: %s\n", msg)
 			switch c.state {
 			case Connect:
 				// Only message that can be sent is MsgConnect
@@ -175,9 +189,9 @@ func (c *client) main() {
 				// When an Ack message matches and removes the MsgConnect
 				// the connection is declared to be successful
 				if msg.Type == MsgConnect {
+					c.sWin.Reinit(msg.SeqNum, msg.SeqNum+1, 1)
 					c.sWin.Put(msg.SeqNum, msg)
 					sendToServer(c.clientConn, msg)
-					log.Printf("sent connect..\n")
 				}
 
 			case Active:
@@ -187,14 +201,15 @@ func (c *client) main() {
 				// Ack, CAcks get sent directly
 				switch msg.Type {
 				case MsgData:
+					log.Printf("sliding window: %s\n", c.sWin.String())
 					if c.sWin.Put(msg.SeqNum, msg) {
 						sendToServer(c.clientConn, msg)
 						log.Printf("sent\n")
 					} else {
 						log.Printf("dropped\n")
-						log.Printf("sliding window: %s\n", c.sWin.String())
 					}
 				case MsgAck, MsgCAck:
+					// TODO
 					if msg.SeqNum == 0 {
 						log.Println("client heartbeat!")
 					}
@@ -203,63 +218,92 @@ func (c *client) main() {
 			}
 
 		case msg := <-c.msgRecvChan:
-			log.Printf("recv msg: %s | state: %s\n", cStateString(c.state), msg)
+			log.Printf("recv msg: %s\n", msg)
 			switch c.state {
 			case Connect:
-				// if valid connID
-				// resize sliding window
-				// change client state
-				// signal NewClient to return
+				// If valid connID
+				// Resize sliding window
+				// Change client state
+				// Signal NewClient to return
 				if msg.Type == MsgAck && msg.ConnID != 0 {
 					_, exist := c.sWin.Remove(msg.SeqNum)
 					if exist {
 						c.connID = msg.ConnID
 						c.state = Active
-						c.sWin.Reinit(1, c.params.WindowSize+1, c.params.MaxUnackedMessages)
+						log.Printf("Active sn: %d\n", c.currSeqNum)
+						c.sWin.Reinit(c.currSeqNum+1, c.currSeqNum+c.params.WindowSize+1, c.params.MaxUnackedMessages)
 						c.returnNewClient <- 1
 					}
 				}
-
 			case Active:
 				switch msg.Type {
 				case MsgData:
-					// attempt to put in sWin
-					// if successful, send Ack to msgChan
-					log.Println("Unhandled: MsgData")
+					// attempt to put in priorityQueue
+					// send Ack to msgChan
+					//c.msgSendChan <- NewAck(c.connID, msg.SeqNum)
+					c.pQueue.Insert(msg)
+					if c.processRead {
+						msg, err := c.pQueue.GetMin()
+						log.Printf("pq msg: %s \n", msg)
+						if err == nil && msg.SeqNum == c.currSeqNum {
+							c.pQueue.RemoveMin()
+							c.readReturnChan <- &internalMsg{mtype: Read, msg: msg, err: err}
+							c.processRead = false
+						}
+					}
 				case MsgAck, MsgCAck:
 					if msg.SeqNum == 0 {
 						// Heartbeat
-						log.Println("server heartbeat!")
 						c.counter = 0
 					} else {
 						// Data Ack, CAck
-						log.Println("data ack/cack!")
+						c.sWin.Remove(msg.SeqNum)
+						log.Printf("sliding window: %s\n", c.sWin.String())
 					}
 				}
 			}
+		case req := <-c.processInternal:
+			switch req.mtype {
+			case ID:
+				c.connIDReturnChan <- &internalMsg{mtype: ID, id: c.connID}
 
-		// Epoch Timer
-		case <-c.updateCounter:
-			c.counter++
-			log.Printf("Epoch Tick!")
-			if c.counter == c.params.EpochLimit {
-				log.Printf("EpochLimit!")
-				c.returnAll <- 1
+			case Read:
+				c.processRead = true
+
+			case Write:
+				// TODO: Handle non-nil error on lost connection
+				c.currSeqNum++
+				fmt.Printf("currSeqNum: %d\n", c.currSeqNum)
+				checksum := CalculateChecksum(c.connID, c.currSeqNum, len(req.payload), req.payload)
+				msg := NewData(c.connID, c.currSeqNum, len(req.payload), req.payload, checksum)
+				c.writeReturnChan <- &internalMsg{mtype: Write, err: nil, msg: msg}
+
+			case Close:
 			}
-			// TODO: First prioritize sending un Ack'd data messages
-			// If sWin is empty, then send set sentHeartbeat to true
-			// Heartbeat
-			switch c.state {
-			case Connect:
-				// An Ack to the connect request would:
-				// remove the connect message from sWin
-				// and init sWin (see Connect case of msgRecvChan)
-				// so, Is sWin is not empty, resend connection request
-				//if !c.sWin.Empty() {
-				//	c.msgSendChan <- NewConnect(c.currSeqNum)
-				//}
-			case Active:
-			}
+			/*
+				// Epoch Timer
+				case <-c.updateCounter:
+					c.counter++
+					log.Printf("Epoch Tick!")
+					if c.counter == c.params.EpochLimit {
+						log.Printf("EpochLimit!")
+						c.returnAll <- 1
+					}
+					// TODO: First prioritize sending un Ack'd data messages
+					// If sWin is empty, then send set sentHeartbeat to true
+					// Heartbeat
+					switch c.state {
+					case Connect:
+						// An Ack to the connect request would:
+						// remove the connect message from sWin
+						// and init sWin (see Connect case of msgRecvChan)
+						// so, Is sWin is not empty, resend connection request
+						//if !c.sWin.Empty() {
+						//	c.msgSendChan <- NewConnect(c.currSeqNum)
+						//}
+					case Active:
+					}
+			*/
 		}
 	}
 }
@@ -279,7 +323,6 @@ func (c *client) reader() {
 				// Check integrity
 				if checkIntegrity(&msg) {
 					c.msgRecvChan <- &msg
-					log.Printf("read msg: %s | state: %s\n", cStateString(c.state), &msg)
 				}
 			}
 		}
@@ -294,18 +337,6 @@ func (c *client) epochTimer() {
 			return
 		case <-timer.C: // Epoch tick
 			c.updateCounter <- 1
-			if c.sWin.Empty() { // If no unacknowledged messages, send heartbeat
-				c.sendHeartbeat()
-			}
 		}
-	}
-}
-
-func (c *client) sendHeartbeat() {
-	select {
-	case c.msgSendChan <- NewAck(c.connID, 0): // Heartbeat message
-		log.Println("Sent heartbeat")
-	default:
-		log.Println("Skipped heartbeat, msgSendChan is full")
 	}
 }

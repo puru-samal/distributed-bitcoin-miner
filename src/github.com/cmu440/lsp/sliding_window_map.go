@@ -35,13 +35,16 @@ func (m *sWindowMap) Get(sn int) (*Message, bool) {
 }
 
 func (m *sWindowMap) Remove(sn int) (*Message, bool) {
-	msg, exist := m.mp[sn]
-	delete(m.mp, sn)
-	if sn == m.LB {
-		m.LB++
-		m.UB++
+	msg, exist := m.Get(sn)
+	if exist {
+		delete(m.mp, sn)
+		if sn == m.LB {
+			m.LB++
+			m.UB++
+		}
+		return msg, exist
 	}
-	return msg, exist
+	return nil, exist
 }
 
 func (m *sWindowMap) Reinit(lb int, ub int, sz int) {
