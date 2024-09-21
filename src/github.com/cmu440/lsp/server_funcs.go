@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/cmu440/lspnet"
 )
@@ -38,8 +39,8 @@ func (s *server) checkConnection(clientMsg *clientMessage, clientAddr *lspnet.UD
 		pendingPayload:  make(map[int][]byte),
 		readSeqNum:      clientMsg.message.SeqNum + 1,
 		writeSeqNum:     clientMsg.message.SeqNum,
-		unAckedMsgs:     make([]*Message, 0),
-		pendingMsgs:     make([]*Message, 0),
+		unAckedMsgs:     NewPQ(),
+		pendingMsgs:     NewPQ(),
 		hasReceivedData: true,
 		hasSentData:     true,
 		closed:          false,
@@ -79,7 +80,7 @@ func (s *server) DataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAdd
 	ack := NewAck(connID, clientMsg.message.SeqNum)
 	err := s.sendMessage(ack, clientAddr)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 	}
 	client.hasSentData = true
 
@@ -91,7 +92,11 @@ func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) 
 		return acknowledged
 	}
 	client := s.clientInfo[connID]
-	if closing && len(client.pendingMsgs) == 0 && len(client.unAckedMsgs) == 0 {
+	exist := client.unAckedMsgs.Remove(clientMsg.message.SeqNum)
+	if !exist {
+		return acknowledged
+	}
+	if closing && len(client.pendingMsgs.q) == 0 && len(client.unAckedMsgs.q) == 0 {
 		delete(s.clientInfo, connID)
 		if len(s.clientInfo) == 0 {
 			s.shutdownCompleteChan <- true
@@ -140,27 +145,21 @@ func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 		newDataMessage := NewData(writeMsg.connID, client.writeSeqNum, len(writeMsg.payload), writeMsg.payload, checkSum)
 
 		fmt.Println("New Data Message:", newDataMessage)
-		client.pendingMsgs = append(client.pendingMsgs, newDataMessage)
-
-		// send pending messages to the client
-		for _, msg := range client.pendingMsgs {
-			err := s.sendMessage(msg, client.addr)
-			if err != nil {
-				fmt.Println(err)
-			}
-		}
-
+		client.pendingMsgs.Insert(newDataMessage)
+		// // send pending messages to the client
+		// for _, msg := range client.pendingMsgs {
+		// 	err := s.sendMessage(msg, client.addr)
+		// 	if err != nil {
+		// 		fmt.Println(err)
+		// 	}
+		// }
 		client.writeSeqNum += 1
 		s.writeResponseChan <- nil
 	}
 }
 
 func (c *clientInfo) validMessage(seqNum int, params *Params) bool {
-	if len(c.unAckedMsgs) == 0 {
-		return true
-	}
-
-	if c.unAckedMsgs[0].SeqNum == seqNum {
+	if len(c.unAckedMsgs.q) == 0 {
 		return true
 	}
 	return false
@@ -168,18 +167,19 @@ func (c *clientInfo) validMessage(seqNum int, params *Params) bool {
 
 func (s *server) defaultActions() {
 	for _, client := range s.clientInfo {
-		if len(client.pendingMsgs) > 0 {
-			item := client.pendingMsgs[0]
-			client.pendingMsgs = client.pendingMsgs[1:]
-			if client.validMessage(item.SeqNum, s.params) {
+		if len(client.pendingMsgs.q) > 0 {
+			item, err := client.pendingMsgs.RemoveMin()
+			if client.validMessage(item.SeqNum, s.params) && err == nil {
 				err := s.sendMessage(item, client.addr)
 				if err != nil {
 					log.Println(err)
 				}
-				client.unAckedMsgs = append(client.unAckedMsgs, item)
+				client.unAckedMsgs.Insert(item)
 			} else {
-				client.pendingMsgs = append(client.pendingMsgs, item)
+				client.pendingMsgs.Insert(item)
 			}
 		}
 	}
+	time.Sleep(time.Millisecond)
+
 }
