@@ -3,7 +3,6 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 
 	"github.com/cmu440/lspnet"
@@ -49,13 +48,11 @@ func (s *server) checkConnection(clientMsg *clientMessage, clientAddr *lspnet.UD
 	err := s.sendMessage(newAck, clientAddr)
 
 	if err != nil {
-		fmt.Println("Error while sending message")
-		fmt.Println(err)
+		log.Println(err)
 	}
 	newClient.writeSeqNum += 1
 	s.nextConnectionID += 1
 
-	log.Println("New connection")
 	return false
 }
 
@@ -81,7 +78,6 @@ func (s *server) DataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAdd
 		log.Println(err)
 	}
 	client.hasSentData = true
-	log.Println("[Server to Client] Data Sent: ", ack, err)
 }
 
 func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) bool {
@@ -101,7 +97,6 @@ func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) 
 			acknowledged = true
 		}
 	}
-	log.Println("[Server to Client] Acknowledged Sent")
 	return acknowledged
 }
 
@@ -124,7 +119,6 @@ func (s *server) readRequest() {
 			delete(client.pendingPayload, client.readSeqNum)
 			client.readSeqNum += 1
 			s.readResponseChan <- readRes
-			log.Println("Read Response Sent:", readRes)
 			return
 		}
 	}
@@ -147,7 +141,6 @@ func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 
 		client.writeSeqNum += 1
 		s.writeResponseChan <- nil
-		log.Println("Write Response Sent: " + string(writeMsg.payload))
 	}
 }
 
@@ -168,13 +161,9 @@ func (s *server) defaultActions() {
 					log.Println(err)
 				}
 				client.unAckedMsgs.Insert(item)
-				log.Println("[Server to Client] Data Sent: ", item)
 			} else {
 				client.pendingMsgs.Insert(item)
-				log.Println("[Server to Client] Data Not Sent: ", item)
 			}
 		}
 	}
-	//time.Sleep(time.Millisecond)
-
 }

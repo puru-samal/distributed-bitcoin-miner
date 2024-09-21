@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/cmu440/lspnet"
@@ -200,7 +199,6 @@ func (s *server) handleIncomingMessages() {
 		var msg Message
 		err = json.Unmarshal(buffer[:n], &msg)
 		if err != nil {
-			log.Println("Error unmarshalling message")
 			continue
 		}
 		clientMsg := &clientMessage{
@@ -223,7 +221,6 @@ func (s *server) monitorDisconnectedClients() {
 
 // Read reads a message from a client. If the server is closed, it returns an error
 func (s *server) Read() (int, []byte, error) {
-	log.Println("[Server] Read Called")
 	for {
 		s.readRequestChan <- true
 		if readRes := <-s.readResponseChan; readRes.payload != nil {
@@ -238,7 +235,6 @@ func (s *server) Read() (int, []byte, error) {
 
 // Write writes a message to a client. If the server is closed, it returns an error
 func (s *server) Write(connId int, payload []byte) error {
-	log.Println("[Server] Write Called")
 	writeMsg := &clientWriteRequest{
 		connID:  connId,
 		payload: payload,
