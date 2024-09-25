@@ -289,7 +289,6 @@ func (c *client) main() {
 					if msg.SeqNum == 0 {
 						c.counter = 0 // Sent
 					} else {
-						log.Printf("Here?")
 						c.unAckedMsgs.Remove(msg.SeqNum)
 					}
 				}

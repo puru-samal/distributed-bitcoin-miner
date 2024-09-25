@@ -97,15 +97,7 @@ func (m *sWindowMap) GetMinMsg() (*Message, bool) {
 			minKey = k
 		}
 	}
-	return m.mp[minKey], true
-}
-
-func (m *sWindowMap) PQify() bool {
-	m.pq = NewPQ()
-	for _, msg := range m.mp {
-		m.pq.Insert(msg)
-	}
-	return (m.pq != nil) && (len(m.pq.q) == len(m.mp))
+	return m.mp[minKey].msg, true
 }
 
 func (m *sWindowMap) String() string {
