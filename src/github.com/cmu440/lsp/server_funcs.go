@@ -37,7 +37,7 @@ func (s *server) checkConnection(clientMsg *clientMessage, clientAddr *lspnet.UD
 		pendingPayload:  make(map[int][]byte),
 		readSeqNum:      clientMsg.message.SeqNum + 1,
 		writeSeqNum:     clientMsg.message.SeqNum,
-		unAckedMsgs:     NewPQ(),
+		unAckedMsgs:     NewSWM(0, 1, 1),
 		pendingMsgs:     NewPQ(),
 		hasReceivedData: true,
 		hasSentData:     true,
@@ -86,11 +86,11 @@ func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) 
 		return acknowledged
 	}
 	client := s.clientInfo[connID]
-	exist := client.unAckedMsgs.Remove(clientMsg.message.SeqNum)
+	_, exist := client.unAckedMsgs.Remove(clientMsg.message.SeqNum)
 	if !exist {
 		return acknowledged
 	}
-	if closing && len(client.pendingMsgs.q) == 0 && len(client.unAckedMsgs.q) == 0 {
+	if closing && len(client.pendingMsgs.q) == 0 && len(client.unAckedMsgs.mp) == 0 {
 		delete(s.clientInfo, connID)
 		if len(s.clientInfo) == 0 {
 			s.shutdownCompleteChan <- true
@@ -145,7 +145,7 @@ func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 }
 
 func (c *clientInfo) validMessage(seqNum int, params *Params) bool {
-	if len(c.unAckedMsgs.q) == 0 {
+	if len(c.unAckedMsgs.mp) == 0 {
 		return true
 	}
 	return false
@@ -160,10 +160,52 @@ func (s *server) defaultActions() {
 				if err != nil {
 					log.Println(err)
 				}
-				client.unAckedMsgs.Insert(item)
+				client.unAckedMsgs.Put(item.SeqNum, item)
 			} else {
 				client.pendingMsgs.Insert(item)
 			}
 		}
+	}
+}
+
+func (s *server) resendUnAckedMessages() {
+	for _, client := range s.clientInfo {
+		for _, item := range client.unAckedMsgs.mp {
+			if item.unAckedCounter == item.currBackoff {
+				err := s.sendMessage(item.msg, client.addr)
+				if err != nil {
+					log.Println(err)
+				}
+				client.hasSentData = true
+				if item.currBackoff == 0 {
+					item.currBackoff = 1
+				} else {
+					item.currBackoff = item.currBackoff * 2
+				}
+				item.unAckedCounter = 0
+				item.currBackoff = min(item.currBackoff, s.params.MaxBackOffInterval)
+			} else {
+				item.unAckedCounter += 1
+			}
+		}
+
+	}
+}
+
+func (s *server) sendHeartbeatMessages() {
+	for _, client := range s.clientInfo {
+		if !client.hasReceivedData {
+			client.unReceivedNum += 1
+			if client.unReceivedNum >= s.params.EpochLimit {
+				client.closed = true
+			}
+		}
+		client.hasReceivedData = false
+	}
+	for connID, client := range s.clientInfo {
+		if !client.hasSentData {
+			s.sendMessage(NewAck(connID, 0), client.addr)
+		}
+		client.hasSentData = false
 	}
 }
