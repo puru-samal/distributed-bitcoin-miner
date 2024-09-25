@@ -1,12 +1,15 @@
 package lsp
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type sWindowMap struct {
 	mp      map[int]*Message
 	LB      int // Lower bound (inclusive)
 	UB      int // Upper bound (exclusive)
 	maxSize int
+	pq      *priorityQueue
 }
 
 /** API **/
@@ -17,6 +20,7 @@ func NewSWM(lb int, ub int, sz int) *sWindowMap {
 		LB:      lb,
 		UB:      ub,
 		maxSize: sz,
+		pq:      nil,
 	}
 	return newMap
 }
@@ -35,6 +39,7 @@ func (m *sWindowMap) Get(sn int) (*Message, bool) {
 }
 
 func (m *sWindowMap) Remove(sn int) (*Message, bool) {
+
 	msg, exist := m.Get(sn)
 	if exist {
 		delete(m.mp, sn)
@@ -59,6 +64,34 @@ func (m *sWindowMap) MinKey() int {
 
 func (m *sWindowMap) Empty() bool {
 	return len(m.mp) == 0
+}
+
+func (m *sWindowMap) In(key int) bool {
+	_, exist := m.mp[key]
+	return exist
+}
+
+func (m *sWindowMap) GetMinMsg() (*Message, bool) {
+
+	if len(m.mp) == 0 {
+		return nil, false
+	}
+
+	minKey := m.UB
+	for k := range m.mp {
+		if minKey > k {
+			minKey = k
+		}
+	}
+	return m.mp[minKey], true
+}
+
+func (m *sWindowMap) PQify() bool {
+	m.pq = NewPQ()
+	for _, msg := range m.mp {
+		m.pq.Insert(msg)
+	}
+	return (m.pq != nil) && (len(m.pq.q) == len(m.mp))
 }
 
 func (m *sWindowMap) String() string {

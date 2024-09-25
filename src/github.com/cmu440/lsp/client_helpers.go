@@ -2,15 +2,47 @@ package lsp
 
 import (
 	"encoding/json"
+	"errors"
+	"log"
 
 	"github.com/cmu440/lspnet"
 )
 
-func sendToServer(conn *lspnet.UDPConn, msg *Message) {
+type internalMsg struct {
+	mtype InternalType
+	err   error
+	id    int
+	msg   *Message
+}
+
+type unAckedMsg struct {
+	msg         *Message
+	currBackoff int
+}
+
+// Helper funcs
+
+func sendToServer(conn *lspnet.UDPConn, msg *Message, logging bool) {
 	byt, err := json.Marshal(msg)
 	if err == nil {
 		conn.Write(byt)
+		if logging {
+			log.Println("sent")
+		}
 	}
+}
+
+func recvFromServer(conn *lspnet.UDPConn, msg *Message, logging bool) error {
+	buf := make([]byte, 2000)
+	n, err := conn.Read(buf)
+	if err == nil && checkIntegrity(msg) {
+		json.Unmarshal(buf[:n], &msg)
+		if logging {
+			log.Println("recv")
+		}
+		return nil
+	}
+	return err
 }
 
 func checkIntegrity(msg *Message) bool {
@@ -24,6 +56,17 @@ func checkIntegrity(msg *Message) bool {
 	default:
 		return true
 	}
+}
+
+func validateWriteInternal(c *client, req *internalMsg) {
+	if c.state == Lost || c.state == Closing {
+		req.err = errors.New("Server connection lost")
+	}
+	checksum := CalculateChecksum(c.connID, c.currSeqNum, len(req.msg.Payload), req.msg.Payload)
+	req.msg.ConnID = c.connID
+	req.msg.SeqNum = c.currSeqNum
+	req.msg.Checksum = checksum
+	req.err = nil
 }
 
 func cStateString(state ClientState) string {

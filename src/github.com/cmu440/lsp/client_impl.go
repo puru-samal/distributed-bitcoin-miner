@@ -3,18 +3,21 @@
 package lsp
 
 import (
-	"encoding/json"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/cmu440/lspnet"
 )
 
+// Helper types
 type ClientState int
 
 const (
 	Connect ClientState = iota // Connect State
 	Active                     // Active State
+	Closing                    // Closing State
+	Lost                       // Conn lost State
 )
 
 type InternalType int
@@ -26,14 +29,6 @@ const (
 	Close
 )
 
-type internalMsg struct {
-	mtype   InternalType
-	payload []byte
-	err     error
-	id      int
-	msg     *Message
-}
-
 type client struct {
 	// internal state
 	state      ClientState
@@ -42,16 +37,20 @@ type client struct {
 	params     *Params
 	connID     int
 	currSeqNum int
+	connLost   chan int
 
-	// cleanup
+	// Return signals
 	returnNewClient chan int
-	returnAll       chan int
+	returnMain      chan int
+	returnReader    chan int
+	returnTimer     chan int
 
 	// Read | Write | ConnID
 	processRead      bool
 	readReturnChan   chan *internalMsg
 	connIDReturnChan chan *internalMsg
 	writeReturnChan  chan *internalMsg
+	closeMsgChan     chan *Message
 	closeReturnChan  chan *internalMsg
 	processInternal  chan *internalMsg
 
@@ -64,8 +63,8 @@ type client struct {
 	msgRecvChan chan *Message
 
 	// internal data structures
-	sWin   *sWindowMap
-	pQueue *priorityQueue
+	unAckedMsgs *sWindowMap
+	pendingRead *priorityQueue
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -86,13 +85,13 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	// Create a connection
 	serverAddr, err := lspnet.ResolveUDPAddr("udp", hostport)
 	if err != nil {
-		//log.Println("Error: serverAddr un-resolved")
+		log.Println("Error: serverAddr un-resolved")
 		return nil, err
 	}
 
 	conn, err := lspnet.DialUDP("udp", nil, serverAddr)
 	if err != nil {
-		//log.Println("Error: Could not connect")
+		log.Println("Error: Could not connect")
 		return nil, err
 	}
 
@@ -103,9 +102,12 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		params:     params,
 		connID:     0,
 		currSeqNum: initialSeqNum,
+		connLost:   make(chan int),
 
 		returnNewClient: make(chan int),
-		returnAll:       make(chan int),
+		returnMain:      make(chan int),
+		returnReader:    make(chan int),
+		returnTimer:     make(chan int),
 
 		processRead:      false,
 		readReturnChan:   make(chan *internalMsg),
@@ -120,8 +122,8 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		msgSendChan: make(chan *Message),
 		msgRecvChan: make(chan *Message),
 
-		sWin:   NewSWM(0, 1, 1),
-		pQueue: NewPQ(),
+		unAckedMsgs: NewSWM(0, 1, 1),
+		pendingRead: NewPQ(),
 	}
 
 	// Launch Main Routine
@@ -135,88 +137,119 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	// Block until connID set or EpochLimit reached
 	c.msgSendChan <- NewConnect(initialSeqNum)
 	select {
-	case <-c.returnAll:
+	case <-c.connLost:
 		return nil, errors.New("connection could not be established")
 	case <-c.returnNewClient:
-		//log.Println("Success: Connected!")
+		log.Println("Client -> Connected!")
 		return c, nil
 	}
 }
 
+// Sends an internalMsg to Main
+// Main processes the request and sends a response with the clients connID
 func (c *client) ConnID() int {
-	//log.Printf("Client ConnID\n")
 	c.processInternal <- &internalMsg{mtype: ID}
 	req := <-c.connIDReturnChan
 	return req.id
 }
 
+// Sends an internalMsg to Main
+// Main blocks until the data message with sn:currSeqNum is available
+// Once available, Read sends an Ack message and returns
 func (c *client) Read() ([]byte, error) {
-	//log.Printf("Client Read\n")
 	c.processInternal <- &internalMsg{mtype: Read}
-	req := <-c.readReturnChan
-	c.msgSendChan <- NewAck(c.connID, req.msg.SeqNum)
-	return req.msg.Payload, req.err
+	resp := <-c.readReturnChan
+	if resp.err == nil {
+		c.msgSendChan <- NewAck(c.connID, resp.msg.SeqNum)
+	}
+	return resp.msg.Payload, resp.err
 }
 
+// Creates and sends a data message with 0 id, sn, checksum
+// Main validates (assigns id, sn, checksum, errors) and sends the the message back to Write
+// Write then sends the message to it to Main if there's no errors
 func (c *client) Write(payload []byte) error {
-	//log.Printf("Client Write\n")
-	c.processInternal <- &internalMsg{mtype: Write, payload: payload}
+	wr_msg := NewData(0, 0, len(payload), payload, 0)
+	c.processInternal <- &internalMsg{mtype: Write, msg: wr_msg}
 	resp := <-c.writeReturnChan
-	c.msgSendChan <- resp.msg
+	if resp.err == nil {
+		c.msgSendChan <- resp.msg
+	}
 	return resp.err
 }
 
+// TODO:
 func (c *client) Close() error {
-	c.processInternal <- &internalMsg{mtype: Close}
-	req := <-c.closeReturnChan
-	return req.err
+	for {
+		c.processInternal <- &internalMsg{mtype: Close}
+		select {
+		case req := <-c.closeReturnChan:
+			return req.err
+
+		case msg := <-c.closeMsgChan:
+			c.msgSendChan <- msg
+		}
+	}
 }
 
 func (c *client) main() {
 	for {
 		select {
-		case <-c.returnAll:
+		case <-c.returnMain:
+			log.Printf("returning: main")
 			return
 		case msg := <-c.msgSendChan:
-			//log.Printf("to send msg: %s\n", msg)
+			log.Printf("send msg: %s\n", msg)
 			switch c.state {
+			// Connection pending...
 			case Connect:
-				// Only message that can be sent is MsgConnect
-				// Only the first MsgConnect will be put in sWin
-				// Subsequent calls with not put anything since sWin maxSize = 1
-				// When an Ack message matches and removes the MsgConnect
-				// the connection is declared to be successful
+				// unAckedMsgs is init to have be a 1-sized window
+				// The lower-bound on this window is currSeqNum
+				// An Ack message has to match and remove MsgConnect
+				// Only then, a connection is declared to be successful
 				if msg.Type == MsgConnect {
-					c.sWin.Reinit(msg.SeqNum, msg.SeqNum+1, 1)
-					c.sWin.Put(msg.SeqNum, msg)
-					sendToServer(c.clientConn, msg)
+					LB := c.currSeqNum
+					UB := c.currSeqNum + 1
+					mSz := 1
+					c.unAckedMsgs.Reinit(LB, UB, mSz)
+					c.unAckedMsgs.Put(c.currSeqNum, msg)
+					sendToServer(c.clientConn, msg, true)
 				}
-
+			// Connection established!
 			case Active:
-				// Once a connection is successful
-				// Attempt to put inside sliding window
-				// send if not dropped
-				// Ack, CAcks get sent directly
 				switch msg.Type {
 				case MsgData:
-					//log.Printf("sliding window: %s\n", c.sWin.String())
-					if c.sWin.Put(msg.SeqNum, msg) {
-						sendToServer(c.clientConn, msg)
-						//log.Printf("sent\n")
-					} else {
-						//log.Printf("dropped\n")
+					// Attempt to put inside sliding window
+					// Send if putting inside the window was a success
+					// Since, write increments currSeqNum
+					// If data message dropped, currSeqNum is decremented to restore order
+					// TODO: Resend messages in unAckedMsgs on epochFire acc to backoff rules
+					if c.unAckedMsgs.In(msg.SeqNum) { // Retry Data Message
+						sendToServer(c.clientConn, msg, true)
+					} else { // New Data Message
+						if c.unAckedMsgs.Put(msg.SeqNum, msg) {
+							sendToServer(c.clientConn, msg, true)
+						} else { // Dropped, so restore
+							c.currSeqNum--
+						}
 					}
+
 				case MsgAck, MsgCAck:
-					// TODO
+					// TODO  : Handle client heartbeat
+					// Maybe : nothing special?
 					if msg.SeqNum == 0 {
-						//log.Println("client heartbeat!")
+						log.Println("client heartbeat!")
 					}
-					sendToServer(c.clientConn, msg)
+					sendToServer(c.clientConn, msg, true)
+				}
+			case Closing:
+				if msg.Type == MsgData {
+					sendToServer(c.clientConn, msg, true)
 				}
 			}
 
 		case msg := <-c.msgRecvChan:
-			//log.Printf("recv msg: %s\n", msg)
+			log.Printf("recv msg: %s\n", msg)
 			switch c.state {
 			case Connect:
 				// If valid connID
@@ -224,39 +257,51 @@ func (c *client) main() {
 				// Change client state
 				// Signal NewClient to return
 				if msg.Type == MsgAck && msg.ConnID != 0 {
-					_, exist := c.sWin.Remove(msg.SeqNum)
+					_, exist := c.unAckedMsgs.Remove(msg.SeqNum)
 					if exist {
 						c.connID = msg.ConnID
 						c.state = Active
-						//log.Printf("Active sn: %d\n", c.currSeqNum)
-						c.sWin.Reinit(c.currSeqNum+1, c.currSeqNum+c.params.WindowSize+1, c.params.MaxUnackedMessages)
+						LB := c.currSeqNum + 1
+						UB := LB + c.params.WindowSize
+						mSz := c.params.MaxUnackedMessages
+						c.unAckedMsgs.Reinit(LB, UB, mSz)
 						c.returnNewClient <- 1
 					}
 				}
 			case Active:
 				switch msg.Type {
 				case MsgData:
-					// attempt to put in priorityQueue
-					// send Ack to msgChan
-					//c.msgSendChan <- NewAck(c.connID, msg.SeqNum)
-					c.pQueue.Insert(msg)
+					// Put in priorityQueue
+					// TODO: handle duplicates based on currSeqNum + window ?
+					c.pendingRead.Insert(msg)
 					if c.processRead {
-						msg, err := c.pQueue.GetMin()
-						//log.Printf("pq msg: %s \n", msg)
-						if err == nil && msg.SeqNum == c.currSeqNum {
-							c.pQueue.RemoveMin()
-							c.readReturnChan <- &internalMsg{mtype: Read, msg: msg, err: err}
+						pqmsg, exist := c.pendingRead.GetMin()
+						if exist && pqmsg.SeqNum == c.currSeqNum {
+							_, err := c.pendingRead.RemoveMin()
+							c.readReturnChan <- &internalMsg{mtype: Read, msg: pqmsg, err: err}
 							c.processRead = false
 						}
 					}
 				case MsgAck, MsgCAck:
+					// TODO  : Handle server heartbeat
+					// TODO  : Reset the EpochLimit timer
+					// TODO  : By sending to a channel in Timer
 					if msg.SeqNum == 0 {
-						// Heartbeat
-						c.counter = 0
+						c.counter = 0 // Sent
 					} else {
-						// Data Ack, CAck
-						c.sWin.Remove(msg.SeqNum)
-						//log.Printf("sliding window: %s\n", c.sWin.String())
+						log.Printf("Here?")
+						c.unAckedMsgs.Remove(msg.SeqNum)
+					}
+				}
+			case Closing:
+				if msg.Type == MsgAck || msg.Type == MsgCAck {
+					// TODO  : Handle server heartbeat
+					// TODO  : Reset the EpochLimit timer
+					// TODO  : By sending to a channel in Timer
+					if msg.SeqNum == 0 {
+						c.counter = 0 // Sent
+					} else {
+						c.unAckedMsgs.Remove(msg.SeqNum)
 					}
 				}
 			}
@@ -269,14 +314,29 @@ func (c *client) main() {
 				c.processRead = true
 
 			case Write:
-				// TODO: Handle non-nil error on lost connection
+				// Assign checksum, connID, seqNum to a data msg within request
+				// Assign err (if any)(TODO: Handle non-nil error on lost connection)
+				// Then send back to Write
 				c.currSeqNum++
-				//log.Printf("currSeqNum: %d\n", c.currSeqNum)
-				checksum := CalculateChecksum(c.connID, c.currSeqNum, len(req.payload), req.payload)
-				msg := NewData(c.connID, c.currSeqNum, len(req.payload), req.payload, checksum)
-				c.writeReturnChan <- &internalMsg{mtype: Write, err: nil, msg: msg}
+				validateWriteInternal(c, req)
+				c.writeReturnChan <- req
 
 			case Close:
+				// TODO: While theres unAckd's messages
+				// TODO: Get message with the lowest sn
+				// TODO: Send data msgs to the closeMsgChan
+				// TODO: closeMsgChan in Close forwards it to msgSendChan (new Close State required ?)
+				// TODO: Acks recieved in msgRecvChan will remove the items (new Close State required ?)
+				// TODO: Then, Close will send another InternalRequest
+				// TODO: Only when unAckedMsgs is empty or connection has been lost,
+				// TODO: closeReturnChan <- 1 will prompt close to return
+				c.state = Closing
+				msg, exist := c.unAckedMsgs.GetMinMsg()
+				if exist {
+					c.closeMsgChan <- msg
+				} else {
+					c.closeReturnChan <- &internalMsg{mtype: Close, err: nil}
+				}
 			}
 			/*
 				// TODO: Epoch Timer
@@ -296,18 +356,14 @@ func (c *client) reader() {
 	for {
 		select {
 		// handle termination due to server Close
-		case <-c.returnAll:
+		case <-c.returnReader:
+			log.Printf("returning: reader")
 			return
 		default:
-			buf := make([]byte, 2000)
-			n, err := c.clientConn.Read(buf)
+			var msg Message
+			err := recvFromServer(c.clientConn, &msg, true)
 			if err == nil {
-				var msg Message
-				json.Unmarshal(buf[:n], &msg)
-				// Check integrity
-				if checkIntegrity(&msg) {
-					c.msgRecvChan <- &msg
-				}
+				c.msgRecvChan <- &msg
 			}
 		}
 	}
@@ -317,7 +373,8 @@ func (c *client) epochTimer() {
 	timer := time.NewTicker(time.Duration(c.params.EpochMillis) * time.Millisecond)
 	for {
 		select {
-		case <-c.returnAll:
+		case <-c.returnTimer:
+			log.Printf("returning: timer")
 			return
 		case <-timer.C: // Epoch tick
 			c.updateCounter <- 1
