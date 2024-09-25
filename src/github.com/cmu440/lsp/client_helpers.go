@@ -15,11 +15,6 @@ type internalMsg struct {
 	msg   *Message
 }
 
-type unAckedMsg struct {
-	msg         *Message
-	currBackoff int
-}
-
 // Helper funcs
 
 func sendToServer(conn *lspnet.UDPConn, msg *Message, logging bool) {
@@ -27,7 +22,7 @@ func sendToServer(conn *lspnet.UDPConn, msg *Message, logging bool) {
 	if err == nil {
 		conn.Write(byt)
 		if logging {
-			log.Println("sent")
+			log.Println("sent'")
 		}
 	}
 }
@@ -38,7 +33,7 @@ func recvFromServer(conn *lspnet.UDPConn, msg *Message, logging bool) error {
 	if err == nil && checkIntegrity(msg) {
 		json.Unmarshal(buf[:n], &msg)
 		if logging {
-			log.Println("recv")
+			log.Println("recv'd")
 		}
 		return nil
 	}

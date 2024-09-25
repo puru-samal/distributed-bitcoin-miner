@@ -14,9 +14,9 @@ func TestPriorityQueue(t *testing.T) {
 	pq.Insert(NewData(connID, 8, len(dummyPayload), dummyPayload, 0))
 	pq.Insert(NewData(connID, 1, len(dummyPayload), dummyPayload, 0))
 
-	min, exist := pq.GetMin()
-	if !exist {
-		t.Fatalf("Error occurred")
+	min, err := pq.GetMin()
+	if err != nil {
+		t.Fatalf("Error occurred: %v", err)
 	}
 	if min.SeqNum != 1 {
 		t.Errorf("Expected min to be 1, but got %d", min)
@@ -32,9 +32,9 @@ func TestPriorityQueue(t *testing.T) {
 	}
 
 	// Test after removal
-	min, exist = pq.GetMin()
-	if !exist {
-		t.Fatalf("Error occurred")
+	min, err = pq.GetMin()
+	if err != nil {
+		t.Fatalf("Error occurred: %v", err)
 	}
 	if min.SeqNum != 3 {
 		t.Errorf("Expected min to be 3, but got %d", min)
@@ -53,8 +53,8 @@ func TestPriorityQueue(t *testing.T) {
 
 	// Test inserting and removing from an empty queue
 	pq.Insert(NewData(connID, 10, len(dummyPayload), dummyPayload, 0))
-	min, exist = pq.GetMin()
-	if !exist {
+	min, err = pq.GetMin()
+	if err != nil {
 		t.Fatalf("Error occurred: %v", err)
 	}
 	if min.SeqNum != 10 {
@@ -66,12 +66,12 @@ func TestEmptyPriorityQueue(t *testing.T) {
 	// Test for an empty queue
 	pq := NewPQ()
 
-	_, exist := pq.GetMin()
-	if exist {
+	_, err := pq.GetMin()
+	if err == nil {
 		t.Errorf("Expected error when calling GetMin on empty queue, but got none")
 	}
 
-	_, err := pq.RemoveMin()
+	_, err = pq.RemoveMin()
 	if err == nil {
 		t.Errorf("Expected error when calling RemoveMin on empty queue, but got none")
 	}
@@ -89,9 +89,9 @@ func TestMultipleInserts(t *testing.T) {
 	}
 
 	for i := 1; i <= 10; i++ {
-		min, exist := pq.GetMin()
-		if !exist {
-			t.Fatalf("Error occurred.")
+		min, err := pq.GetMin()
+		if err != nil {
+			t.Fatalf("Error occurred: %v", err)
 		}
 		if min.SeqNum != i {
 			t.Errorf("Expected min to be %d, but got %d", i, min)

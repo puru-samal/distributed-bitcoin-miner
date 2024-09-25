@@ -148,6 +148,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 // Sends an internalMsg to Main
 // Main processes the request and sends a response with the clients connID
 func (c *client) ConnID() int {
+	log.Println("Client connid!")
 	c.processInternal <- &internalMsg{mtype: ID}
 	req := <-c.connIDReturnChan
 	return req.id
@@ -157,6 +158,7 @@ func (c *client) ConnID() int {
 // Main blocks until the data message with sn:currSeqNum is available
 // Once available, Read sends an Ack message and returns
 func (c *client) Read() ([]byte, error) {
+	log.Println("Client read!")
 	c.processInternal <- &internalMsg{mtype: Read}
 	resp := <-c.readReturnChan
 	if resp.err == nil {
@@ -169,6 +171,7 @@ func (c *client) Read() ([]byte, error) {
 // Main validates (assigns id, sn, checksum, errors) and sends the the message back to Write
 // Write then sends the message to it to Main if there's no errors
 func (c *client) Write(payload []byte) error {
+	log.Println("Client write!")
 	wr_msg := NewData(0, 0, len(payload), payload, 0)
 	c.processInternal <- &internalMsg{mtype: Write, msg: wr_msg}
 	resp := <-c.writeReturnChan
@@ -180,6 +183,7 @@ func (c *client) Write(payload []byte) error {
 
 // TODO:
 func (c *client) Close() error {
+	log.Println("Client close!")
 	for {
 		c.processInternal <- &internalMsg{mtype: Close}
 		select {
@@ -273,11 +277,13 @@ func (c *client) main() {
 				case MsgData:
 					// Put in priorityQueue
 					// TODO: handle duplicates based on currSeqNum + window ?
+					//log.Printf("insert recv pq: %s\n", msg)
 					c.pendingRead.Insert(msg)
 					if c.processRead {
 						pqmsg, exist := c.pendingRead.GetMin()
-						if exist && pqmsg.SeqNum == c.currSeqNum {
+						if exist == nil && pqmsg.SeqNum == c.currSeqNum {
 							_, err := c.pendingRead.RemoveMin()
+							//log.Printf("extracting pq: %s\n", pqmsg)
 							c.readReturnChan <- &internalMsg{mtype: Read, msg: pqmsg, err: err}
 							c.processRead = false
 						}
@@ -289,6 +295,7 @@ func (c *client) main() {
 					if msg.SeqNum == 0 {
 						c.counter = 0 // Sent
 					} else {
+						log.Printf("ackd remove: %d\n", msg.SeqNum)
 						c.unAckedMsgs.Remove(msg.SeqNum)
 					}
 				}
@@ -317,7 +324,9 @@ func (c *client) main() {
 				// Assign err (if any)(TODO: Handle non-nil error on lost connection)
 				// Then send back to Write
 				c.currSeqNum++
+				//log.Printf("pre-validated: %s\n", req.msg)
 				validateWriteInternal(c, req)
+				//log.Printf("post-validated: %s\n", req.msg)
 				c.writeReturnChan <- req
 
 			case Close:
