@@ -2,8 +2,14 @@ package lsp
 
 import "fmt"
 
+type unAckedMsgs struct {
+	msg            *Message
+	currBackoff    int
+	unAckedCounter int
+}
+
 type sWindowMap struct {
-	mp      map[int]*Message
+	mp      map[int]*unAckedMsgs
 	LB      int // Lower bound (inclusive)
 	UB      int // Upper bound (exclusive)
 	maxSize int
@@ -13,7 +19,7 @@ type sWindowMap struct {
 
 func NewSWM(lb int, ub int, sz int) *sWindowMap {
 	newMap := &sWindowMap{
-		mp:      make(map[int]*Message),
+		mp:      make(map[int]*unAckedMsgs),
 		LB:      lb,
 		UB:      ub,
 		maxSize: sz,
@@ -23,15 +29,23 @@ func NewSWM(lb int, ub int, sz int) *sWindowMap {
 
 func (m *sWindowMap) Put(sn int, elem *Message) bool {
 	if m.isValidKey(sn) && !m.isFull() {
-		m.mp[sn] = elem
+		m.mp[sn] = &unAckedMsgs{
+			msg:            elem,
+			currBackoff:    1,
+			unAckedCounter: 0,
+		}
 		return true
 	}
 	return false
 }
 
 func (m *sWindowMap) Get(sn int) (*Message, bool) {
-	msg, exist := m.mp[sn]
-	return msg, exist
+	unAckedMsg, exist := m.mp[sn]
+	if !exist {
+		return nil, exist
+	}
+
+	return unAckedMsg.msg, exist
 }
 
 func (m *sWindowMap) Remove(sn int) (*Message, bool) {

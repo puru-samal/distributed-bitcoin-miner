@@ -18,6 +18,7 @@ type server struct {
 	nextConnectionID int
 
 	// Channels to read and write messages to/from clients
+	ticker            *time.Ticker
 	incomingMsgChan   chan *clientMessage
 	readRequestChan   chan bool
 	readResponseChan  chan *readResponse
@@ -63,13 +64,15 @@ type clientInfo struct {
 	readSeqNum  int
 	writeSeqNum int
 
-	unAckedMsgs *priorityQueue
+	unAckedMsgs *sWindowMap
 	pendingMsgs *priorityQueue
 
 	// variables to keep track of whether the client has received or sent data
 	hasReceivedData bool
 	hasSentData     bool
 	closed          bool
+
+	unReceivedNum int
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -94,6 +97,7 @@ func NewServer(port int, params *Params) (Server, error) {
 		clientInfo:       make(map[int]*clientInfo),
 		nextConnectionID: 1,
 
+		ticker:            time.NewTicker(time.Millisecond * time.Duration(params.EpochMillis)),
 		incomingMsgChan:   make(chan *clientMessage),
 		readRequestChan:   make(chan bool),
 		readResponseChan:  make(chan *readResponse),
@@ -125,6 +129,12 @@ func (s *server) serverMain() {
 
 	for {
 		select {
+		case <-s.ticker.C:
+			// Resend unacknowledged messages
+			s.resendUnAckedMessages()
+			// Acknowledgement to clients that have not received any messages during the last epoch
+			s.sendHeartbeatMessages()
+
 		case clientMsg := <-s.incomingMsgChan:
 			messageType := clientMsg.message.Type
 			clientAddr := clientMsg.addr
@@ -149,6 +159,7 @@ func (s *server) serverMain() {
 			}
 			if client, ok := s.clientInfo[connId]; ok {
 				client.hasReceivedData = true
+				client.unReceivedNum = 0
 			}
 
 		case <-s.readRequestChan:
@@ -172,7 +183,7 @@ func (s *server) serverMain() {
 		case <-s.serverShutdownChan:
 			shuttingDown = true
 			for connId, client := range s.clientInfo {
-				if client.closed || (len(client.pendingMsgs.q) == 0 && len(client.unAckedMsgs.q) == 0) {
+				if client.closed || (len(client.pendingMsgs.q) == 0 && len(client.unAckedMsgs.mp) == 0) {
 					delete(s.clientInfo, connId)
 				}
 			}
