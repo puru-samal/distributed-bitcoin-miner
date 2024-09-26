@@ -137,7 +137,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		unAckedMsgs: NewSWM(0, 1, 1),
 		pendingRead: NewPQ(),
 
-		logLvl: 2,
+		logLvl: 0,
 	}
 
 	// Launch Main Routine
