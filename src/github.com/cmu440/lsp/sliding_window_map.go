@@ -7,6 +7,7 @@ import (
 type unAckedMsgs struct {
 	msg            *Message
 	currBackoff    int
+	nextBackoff    int
 	unAckedCounter int
 }
 
@@ -35,7 +36,8 @@ func (m *sWindowMap) Put(sn int, elem *Message) bool {
 	if m.isValidKey(sn) && !m.isFull() {
 		m.mp[sn] = &unAckedMsgs{
 			msg:            elem,
-			currBackoff:    1,
+			currBackoff:    0,
+			nextBackoff:    1,
 			unAckedCounter: 0,
 		}
 		return true
@@ -87,7 +89,7 @@ func (m *sWindowMap) In(key int) bool {
 
 func (m *sWindowMap) GetMinMsg() (*Message, bool) {
 
-	if len(m.mp) == 0 {
+	if m.Empty() {
 		return nil, false
 	}
 
@@ -98,6 +100,25 @@ func (m *sWindowMap) GetMinMsg() (*Message, bool) {
 		}
 	}
 	return m.mp[minKey].msg, true
+}
+
+func (m *sWindowMap) UpdateBackoffs(maxBackoff int) (*priorityQueue, bool) {
+	if m.Empty() {
+		return nil, false
+	}
+	pq := NewPQ()
+	for _, v := range m.mp {
+		// update counter,
+		// if equal to next backoff, mark for resend, update backoffs
+		v.unAckedCounter++
+		if v.unAckedCounter == v.nextBackoff {
+			pq.Insert(v.msg)
+			interval := v.nextBackoff - v.currBackoff
+			v.currBackoff = v.nextBackoff
+			v.nextBackoff = v.nextBackoff + min(2*interval, maxBackoff)
+		}
+	}
+	return pq, true
 }
 
 func (m *sWindowMap) String() string {
@@ -112,4 +133,11 @@ func (m *sWindowMap) isValidKey(sn int) bool {
 
 func (m *sWindowMap) isFull() bool {
 	return len(m.mp) == m.maxSize
+}
+
+func min(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
