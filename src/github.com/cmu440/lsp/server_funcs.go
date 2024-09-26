@@ -63,6 +63,7 @@ func (s *server) DataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAdd
 		client, ok := s.clientInfo[connID]
 		if ok {
 			client.hasReceivedData = true
+			client.unReceivedNum = 0
 		}
 		return
 	}
@@ -90,7 +91,7 @@ func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) 
 	if !exist {
 		return acknowledged
 	}
-	if closing && len(client.pendingMsgs.q) == 0 && len(client.unAckedMsgs.mp) == 0 {
+	if closing && client.pendingMsgs.Empty() && client.unAckedMsgs.Empty() {
 		delete(s.clientInfo, connID)
 		if len(s.clientInfo) == 0 {
 			s.shutdownCompleteChan <- true
@@ -144,18 +145,11 @@ func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 	}
 }
 
-func (c *clientInfo) validMessage(seqNum int, params *Params) bool {
-	if len(c.unAckedMsgs.mp) == 0 {
-		return true
-	}
-	return false
-}
-
 func (s *server) defaultActions() {
 	for _, client := range s.clientInfo {
-		if len(client.pendingMsgs.q) > 0 {
-			item, err := client.pendingMsgs.RemoveMin()
-			if client.validMessage(item.SeqNum, s.params) && err == nil {
+		if !client.pendingMsgs.Empty() {
+			item, _ := client.pendingMsgs.RemoveMin()
+			if client.unAckedMsgs.isValidKey(item.SeqNum) || client.unAckedMsgs.Empty() {
 				err := s.sendMessage(item, client.addr)
 				if err != nil {
 					log.Println(err)
@@ -194,7 +188,7 @@ func (s *server) resendUnAckedMessages() {
 
 func (s *server) sendHeartbeatMessages() {
 	for _, client := range s.clientInfo {
-		if !client.hasReceivedData {
+		if !client.hasReceivedData && !client.closed {
 			client.unReceivedNum += 1
 			if client.unReceivedNum >= s.params.EpochLimit {
 				client.closed = true
@@ -203,9 +197,32 @@ func (s *server) sendHeartbeatMessages() {
 		client.hasReceivedData = false
 	}
 	for connID, client := range s.clientInfo {
-		if !client.hasSentData {
+		if !client.hasSentData && !client.closed {
 			s.sendMessage(NewAck(connID, 0), client.addr)
 		}
 		client.hasSentData = false
 	}
+}
+
+func (s *server) CAckHandler(clientMsg *clientMessage, connID int, closing bool) bool {
+	cacknowledged := false
+	if clientMsg.message.SeqNum == 0 {
+		return cacknowledged
+	}
+	client := s.clientInfo[connID]
+	for !client.unAckedMsgs.Empty() {
+		if client.unAckedMsgs.MinKey() <= clientMsg.message.SeqNum {
+			client.unAckedMsgs.Remove(client.unAckedMsgs.MinKey())
+		} else {
+			break
+		}
+	}
+	if closing && client.pendingMsgs.Empty() && client.unAckedMsgs.Empty() {
+		delete(s.clientInfo, connID)
+		if len(s.clientInfo) == 0 {
+			s.shutdownCompleteChan <- true
+			cacknowledged = true
+		}
+	}
+	return cacknowledged
 }

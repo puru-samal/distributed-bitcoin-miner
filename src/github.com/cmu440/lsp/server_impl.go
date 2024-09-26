@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cmu440/lspnet"
@@ -154,8 +155,10 @@ func (s *server) serverMain() {
 					return
 				}
 			case MsgCAck:
-				//s.CAckHandler(clientMsg)
-				return
+				cacknowledged := s.CAckHandler(clientMsg, connId, shuttingDown)
+				if cacknowledged {
+					return
+				}
 			}
 			if client, ok := s.clientInfo[connId]; ok {
 				client.hasReceivedData = true
@@ -183,7 +186,7 @@ func (s *server) serverMain() {
 		case <-s.serverShutdownChan:
 			shuttingDown = true
 			for connId, client := range s.clientInfo {
-				if client.closed || (len(client.pendingMsgs.q) == 0 && len(client.unAckedMsgs.mp) == 0) {
+				if client.closed || (client.pendingMsgs.Empty() && client.unAckedMsgs.Empty()) {
 					delete(s.clientInfo, connId)
 				}
 			}
@@ -205,7 +208,10 @@ func (s *server) handleIncomingMessages() {
 	for {
 		n, addr, err := s.conn.ReadFromUDP(buffer)
 		if err != nil {
-			continue
+			errString := err.Error()
+			if strings.Contains(errString, "use of closed network connection") {
+				return
+			}
 		}
 		var msg Message
 		err = json.Unmarshal(buffer[:n], &msg)
@@ -238,7 +244,7 @@ func (s *server) Read() (int, []byte, error) {
 			return readRes.connID, readRes.payload, nil
 		} else if readRes.connID != -1 {
 			s.removeClientChan <- readRes.connID
-			return -1, nil, errors.New("server is closed")
+			return readRes.connID, nil, errors.New("server is closed")
 		}
 		time.Sleep(time.Millisecond)
 	}

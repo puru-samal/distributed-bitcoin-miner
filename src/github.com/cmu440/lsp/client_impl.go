@@ -32,13 +32,14 @@ const (
 
 type client struct {
 	// internal state
-	state      ClientState
-	serverAddr *lspnet.UDPAddr
-	clientConn *lspnet.UDPConn
-	params     *Params
-	connID     int
-	currSeqNum int
-	connLost   chan int
+	state       ClientState
+	serverAddr  *lspnet.UDPAddr
+	clientConn  *lspnet.UDPConn
+	params      *Params
+	connID      int
+	currSeqNum  int
+	connLost    chan int
+	pendingConn bool
 
 	// Return signals
 	returnNewClient chan int
@@ -104,13 +105,14 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	}
 
 	c := &client{
-		state:      Connect,
-		serverAddr: serverAddr,
-		clientConn: conn,
-		params:     params,
-		connID:     0,
-		currSeqNum: initialSeqNum,
-		connLost:   make(chan int),
+		state:       Connect,
+		serverAddr:  serverAddr,
+		clientConn:  conn,
+		params:      params,
+		connID:      0,
+		currSeqNum:  initialSeqNum,
+		connLost:    make(chan int),
+		pendingConn: false,
 
 		returnNewClient: make(chan int),
 		returnMain:      make(chan int),
@@ -287,6 +289,7 @@ func (c *client) main() {
 			if c.state == Connect {
 				PQ := NewPQ()
 				PQ.Insert(NewConnect(c.currSeqNum))
+				c.pendingConn = true
 				c.msgRetryChan <- PQ
 			} else {
 				retryMsgs, exist := c.unAckedMsgs.UpdateBackoffs(c.params.MaxBackOffInterval)
@@ -300,6 +303,7 @@ func (c *client) main() {
 			}
 
 		case <-c.epLimFire:
+			// TODO:
 			cLog(c, "EpochLimit Fire!", 3)
 
 		}

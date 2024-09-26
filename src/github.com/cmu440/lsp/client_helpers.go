@@ -70,7 +70,12 @@ func processSendConnect(c *client, msg *Message) bool {
 	mSz := 1
 	c.unAckedMsgs.Reinit(LB, UB, mSz)
 	c.unAckedMsgs.Put(c.currSeqNum, msg)
+	cLog(c, fmt.Sprintf("client: pre-connect sWin state: %s\n", c.unAckedMsgs.String()), 2)
 	sent = sendToServer(c.clientConn, msg)
+	if c.pendingConn {
+		c.processRetry <- 1
+		c.pendingConn = false
+	}
 	return sent
 }
 
@@ -99,7 +104,9 @@ func processSendData(c *client, msg *Message) bool {
 		if c.state == Closing {
 			return sent
 		}
+		cLog(c, fmt.Sprintf("client: pre-Put sWin state: %s\n", c.unAckedMsgs.String()), 2)
 		isValid := c.unAckedMsgs.Put(msg.SeqNum, msg)
+		cLog(c, fmt.Sprintf("client: post-Put sWin state: %s\n", c.unAckedMsgs.String()), 2)
 		if isValid {
 			sent = sendToServer(c.clientConn, msg)
 		} else { // Dropped, so restore
@@ -161,11 +168,11 @@ func processRecvAcks(c *client, msg *Message) {
 		}
 	} else {
 		cLog(c, fmt.Sprintf("sWin rm on ack/cack - msg: %s\n", msg), 4)
-		cLog(c, fmt.Sprintf("pre-sWin state: %s\n", c.unAckedMsgs.String()), 4)
+		cLog(c, fmt.Sprintf("pre-sWin state: %s\n", c.unAckedMsgs.String()), 2)
 		c.unAckedMsgs.Remove(msg.SeqNum)
-		cLog(c, fmt.Sprintf("post-sWin state: %s\n", c.unAckedMsgs.String()), 4)
+		cLog(c, fmt.Sprintf("post-sWin state: %s\n", c.unAckedMsgs.String()), 2)
 		if msg.SeqNum == 0 {
-			cLog(c, "server heartbeat!", 4)
+			cLog(c, "server: heartbeat!", 2)
 		}
 
 	}
