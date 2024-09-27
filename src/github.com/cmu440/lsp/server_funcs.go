@@ -44,12 +44,19 @@ func (s *server) checkConnection(clientMsg *clientMessage, clientAddr *lspnet.UD
 		closed:          false,
 	}
 	s.clientInfo[newConnID] = newClient
+
 	newAck := NewAck(s.nextConnectionID, clientMsg.message.SeqNum)
 	err := s.sendMessage(newAck, clientAddr)
-
 	if err != nil {
 		log.Println(err)
 	}
+	LB := clientMsg.message.SeqNum + 1
+	UB := LB + s.params.WindowSize
+	mSz := s.params.MaxUnackedMessages
+	newClient.unAckedMsgs.Reinit(LB, UB, mSz)
+
+	log.Println("[Check Connection] newClient.unAckedMsgs: ", newClient.unAckedMsgs.LB, newClient.unAckedMsgs.UB, newClient.unAckedMsgs.maxSize)
+
 	newClient.writeSeqNum += 1
 	s.nextConnectionID += 1
 
@@ -72,12 +79,14 @@ func (s *server) DataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAdd
 
 	client := s.clientInfo[connID]
 	client.pendingPayload[clientMsg.message.SeqNum] = clientMsg.message.Payload
+
 	ack := NewAck(connID, clientMsg.message.SeqNum)
 	err := s.sendMessage(ack, clientAddr)
 
 	if err != nil {
-		log.Println(err)
+		log.Println("[DataHandler] Error sending ack: ", err)
 	}
+
 	client.hasSentData = true
 }
 
@@ -88,6 +97,7 @@ func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) 
 	}
 	client := s.clientInfo[connID]
 	_, exist := client.unAckedMsgs.Remove(clientMsg.message.SeqNum)
+	log.Println("[AckHandler] client.unAckedMsgs: ", client.unAckedMsgs.LB, client.unAckedMsgs.UB, client.unAckedMsgs.maxSize)
 	if !exist {
 		return acknowledged
 	}

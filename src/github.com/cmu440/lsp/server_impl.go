@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -212,6 +213,8 @@ func (s *server) handleIncomingMessages() {
 			if strings.Contains(errString, "use of closed network connection") {
 				return
 			}
+			log.Println("Error reading from UDP connection:", err)
+			continue
 		}
 		var msg Message
 		err = json.Unmarshal(buffer[:n], &msg)
