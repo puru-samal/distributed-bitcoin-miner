@@ -38,6 +38,7 @@ type client struct {
 	params      *Params
 	connID      int
 	currSeqNum  int
+	readSeqNum  int
 	connLost    chan int
 	pendingConn bool
 
@@ -50,6 +51,7 @@ type client struct {
 
 	// Read | Write | ConnID
 	processRead      bool
+	processWrite     bool
 	readReturnChan   chan *internalMsg
 	connIDReturnChan chan *internalMsg
 	writeReturnChan  chan *internalMsg
@@ -67,10 +69,13 @@ type client struct {
 	msgSendChan  chan *Message
 	msgRecvChan  chan *Message
 	msgRetryChan chan *priorityQueue
+	msgAckChan   chan *Message
+	msgDataChan  chan *Message
 
 	// internal data structures
-	unAckedMsgs *sWindowMap
-	pendingRead *priorityQueue
+	unAckedMsgs  *sWindowMap
+	pendingRead  *priorityQueue
+	pendingWrite *priorityQueue
 
 	// logging
 	logLvl int
@@ -111,6 +116,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		params:      params,
 		connID:      0,
 		currSeqNum:  initialSeqNum,
+		readSeqNum:  initialSeqNum + 1,
 		connLost:    make(chan int),
 		pendingConn: false,
 
@@ -121,6 +127,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		returnRetry:     make(chan int),
 
 		processRead:      false,
+		processWrite:     false,
 		readReturnChan:   make(chan *internalMsg),
 		writeReturnChan:  make(chan *internalMsg),
 		connIDReturnChan: make(chan *internalMsg),
@@ -135,11 +142,14 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		msgSendChan:  make(chan *Message),
 		msgRecvChan:  make(chan *Message),
 		msgRetryChan: make(chan *priorityQueue),
+		msgAckChan:   make(chan *Message),
+		msgDataChan:  make(chan *Message),
 
-		unAckedMsgs: NewSWM(0, 1, 1),
-		pendingRead: NewPQ(),
+		unAckedMsgs:  NewSWM(0, 1, 1),
+		pendingRead:  NewPQ(),
+		pendingWrite: NewPQ(),
 
-		logLvl: 0,
+		logLvl: 2,
 	}
 
 	// Launch Main Routine
@@ -148,7 +158,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	go c.main()
 	go c.reader()
 	go c.timer()
-	go c.retry()
+	go c.redirect()
 
 	// Signal main to send NewConnect message
 	// Block until connID set or EpochLimit reached
@@ -174,14 +184,12 @@ func (c *client) ConnID() int {
 
 // Sends an internalMsg to Main
 // Main blocks until the data message with sn:currSeqNum is available
-// Once available, Read sends an Ack message and returns
+// Once available, Read returns
 func (c *client) Read() ([]byte, error) {
 	cLog(c, "Client read!", 1)
 	c.processInternal <- &internalMsg{mtype: Read}
 	resp := <-c.readReturnChan
-	if resp.err == nil {
-		c.msgSendChan <- NewAck(c.connID, resp.msg.SeqNum)
-	}
+	cLog(c, "Client returning read!", 1)
 	return resp.msg.Payload, resp.err
 }
 
@@ -225,7 +233,8 @@ func (c *client) main() {
 			cLog(c, "returning: main", 1)
 			return
 		case msg := <-c.msgSendChan:
-			cLog(c, fmt.Sprintf("send msg: %s\n", msg), 2)
+			cLog(c, fmt.Sprintf("send msg: %s | sn: %d\n", msg, c.currSeqNum), 2)
+			cLog(c, fmt.Sprintf("client: pre-send sWin state: %s\n", c.unAckedMsgs.String()), 2)
 			var sent bool
 			switch msg.Type {
 			case MsgConnect:
@@ -240,14 +249,17 @@ func (c *client) main() {
 			} else {
 				cLog(c, "dropped!", 2)
 			}
+			cLog(c, fmt.Sprintf("client: post-send sWin state: %s\n", c.unAckedMsgs.String()), 2)
 		case msg := <-c.msgRecvChan:
-			cLog(c, fmt.Sprintf("recv msg: %s\n", msg), 2)
+			cLog(c, fmt.Sprintf("recv msg: %s | rsn: %d\n", msg, c.readSeqNum), 2)
+			cLog(c, fmt.Sprintf("client: pre-recv sWin state: %s\n", c.unAckedMsgs.String()), 2)
 			switch msg.Type {
 			case MsgData:
 				processRecvData(c, msg)
 			case MsgAck, MsgCAck:
 				processRecvAcks(c, msg)
 			}
+			cLog(c, fmt.Sprintf("client: pre-recv sWin state: %s\n", c.unAckedMsgs.String()), 2)
 		case req := <-c.processInternal:
 			switch req.mtype {
 			case ID:
@@ -258,6 +270,7 @@ func (c *client) main() {
 				// Assign checksum, connID, seqNum to a data msg within request
 				// Assign err (if any)(TODO: Handle non-nil error on lost connection)
 				// Then send back to Write
+				c.processWrite = true
 				c.currSeqNum++
 				cLog(c, fmt.Sprintf("pre-validated: %s\n", req.msg), 4)
 				validateWriteInternal(c, req)
@@ -294,6 +307,7 @@ func (c *client) main() {
 			} else {
 				retryMsgs, exist := c.unAckedMsgs.UpdateBackoffs(c.params.MaxBackOffInterval)
 				if exist {
+					cLog(c, fmt.Sprintf("unacked pq: %v\n", retryMsgs.q), 2)
 					c.msgRetryChan <- retryMsgs
 				} else {
 					PQ := NewPQ()
@@ -352,11 +366,11 @@ func (c *client) timer() {
 	}
 }
 
-func (c *client) retry() {
+func (c *client) redirect() {
 	for {
 		select {
 		case <-c.returnRetry:
-			cLog(c, "returning: retry", 3)
+			cLog(c, "returning: redirect", 3)
 			return
 		case pq := <-c.msgRetryChan:
 			cLog(c, fmt.Sprintf("recv retry queue: %v\n", pq.q), 3)
@@ -365,6 +379,10 @@ func (c *client) retry() {
 				c.msgSendChan <- msg
 				<-c.processRetry
 			}
+		case msg := <-c.msgAckChan:
+			c.msgSendChan <- msg
+		case msg := <-c.msgDataChan:
+			c.msgSendChan <- msg
 		}
 	}
 }

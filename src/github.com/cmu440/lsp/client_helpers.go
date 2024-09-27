@@ -36,7 +36,7 @@ func sendToServer(conn *lspnet.UDPConn, msg *Message) bool {
 func recvFromServer(conn *lspnet.UDPConn, msg *Message) error {
 	buf := make([]byte, 2000)
 	n, err := conn.Read(buf)
-	if err == nil && checkIntegrity(msg) {
+	if err == nil {
 		json.Unmarshal(buf[:n], &msg)
 		return nil
 	}
@@ -44,16 +44,12 @@ func recvFromServer(conn *lspnet.UDPConn, msg *Message) error {
 }
 
 func checkIntegrity(msg *Message) bool {
-	switch msg.Type {
-	case MsgData:
-		if len(msg.Payload) < msg.Size {
-			return false
-		}
-		msg.Payload = msg.Payload[:msg.Size]
-		return msg.Checksum == CalculateChecksum(msg.ConnID, msg.SeqNum, msg.Size, msg.Payload)
-	default:
-		return true
+	if len(msg.Payload) < msg.Size {
+		return false
 	}
+	checksum := CalculateChecksum(msg.ConnID, msg.SeqNum, msg.Size, msg.Payload)
+	msg.Payload = msg.Payload[:msg.Size]
+	return msg.Checksum == checksum
 }
 
 // Sends NewConnect and inits client state before connect
@@ -70,7 +66,6 @@ func processSendConnect(c *client, msg *Message) bool {
 	mSz := 1
 	c.unAckedMsgs.Reinit(LB, UB, mSz)
 	c.unAckedMsgs.Put(c.currSeqNum, msg)
-	cLog(c, fmt.Sprintf("client: pre-connect sWin state: %s\n", c.unAckedMsgs.String()), 2)
 	sent = sendToServer(c.clientConn, msg)
 	if c.pendingConn {
 		c.processRetry <- 1
@@ -96,21 +91,18 @@ func processSendData(c *client, msg *Message) bool {
 	isUnAcked := c.unAckedMsgs.In(msg.SeqNum)
 	if isUnAcked { // Old Message
 		sent = sendToServer(c.clientConn, msg)
-		cLog(c, fmt.Sprintf("retry msg sent: %s\n", msg), 4)
 		c.processRetry <- 1
-		cLog(c, "retry signaled", 4)
 	} else { // New Data Message
 
 		if c.state == Closing {
 			return sent
 		}
-		cLog(c, fmt.Sprintf("client: pre-Put sWin state: %s\n", c.unAckedMsgs.String()), 2)
 		isValid := c.unAckedMsgs.Put(msg.SeqNum, msg)
-		cLog(c, fmt.Sprintf("client: post-Put sWin state: %s\n", c.unAckedMsgs.String()), 2)
 		if isValid {
 			sent = sendToServer(c.clientConn, msg)
-		} else { // Dropped, so restore
-			c.currSeqNum--
+		} else {
+			// Dropped, Put in pending PQ
+			c.pendingWrite.Insert(msg)
 		}
 	}
 	return sent
@@ -138,19 +130,24 @@ func processRecvData(c *client, msg *Message) {
 	if c.state != Active {
 		return
 	}
-	LB, UB := c.currSeqNum, c.currSeqNum+c.params.WindowSize
+
+	LB, UB := c.readSeqNum, c.readSeqNum+c.params.WindowSize
 	if LB <= msg.SeqNum && msg.SeqNum < UB {
-		cLog(c, fmt.Sprintf("pq insert msg: %s\n", msg), 3)
-		c.pendingRead.Insert(msg)
-		c.resetEp <- 1
+		if checkIntegrity(msg) {
+			c.pendingRead.Insert(msg)
+		}
 	}
+	c.msgAckChan <- NewAck(c.connID, msg.SeqNum)
+	c.resetEp <- 1
 	if c.processRead {
 		pqmsg, exist := c.pendingRead.GetMin()
-		if exist == nil && pqmsg.SeqNum == c.currSeqNum {
+		cLog(c, fmt.Sprintf("read: pq rmMin msg: %s\n", pqmsg), 2)
+		if exist == nil && pqmsg.SeqNum == c.readSeqNum {
 			_, err := c.pendingRead.RemoveMin()
-			cLog(c, fmt.Sprintf("pq rmMin msg: %s\n", msg), 3)
+
 			c.readReturnChan <- &internalMsg{mtype: Read, msg: pqmsg, err: err}
 			c.processRead = false
+			c.readSeqNum++
 		}
 	}
 }
@@ -167,12 +164,18 @@ func processRecvAcks(c *client, msg *Message) {
 			}
 		}
 	} else {
-		cLog(c, fmt.Sprintf("sWin rm on ack/cack - msg: %s\n", msg), 4)
-		cLog(c, fmt.Sprintf("pre-sWin state: %s\n", c.unAckedMsgs.String()), 2)
 		c.unAckedMsgs.Remove(msg.SeqNum)
-		cLog(c, fmt.Sprintf("post-sWin state: %s\n", c.unAckedMsgs.String()), 2)
 		if msg.SeqNum == 0 {
 			cLog(c, "server: heartbeat!", 2)
+		}
+		if c.processWrite {
+			pqmsg, exist := c.pendingWrite.GetMin()
+			if exist == nil && c.unAckedMsgs.isValidKey(pqmsg.SeqNum) {
+				c.pendingWrite.RemoveMin()
+				cLog(c, fmt.Sprintf("pq rmMin msg (pending write): %s\n", msg), 3)
+				c.msgDataChan <- pqmsg
+				c.processWrite = false
+			}
 		}
 
 	}

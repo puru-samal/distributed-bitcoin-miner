@@ -7,7 +7,6 @@ import (
 type unAckedMsgs struct {
 	msg            *Message
 	currBackoff    int
-	nextBackoff    int
 	unAckedCounter int
 }
 
@@ -16,7 +15,6 @@ type sWindowMap struct {
 	LB      int // Lower bound (inclusive)
 	UB      int // Upper bound (exclusive)
 	maxSize int
-	pq      *priorityQueue
 }
 
 /** API **/
@@ -27,7 +25,6 @@ func NewSWM(lb int, ub int, sz int) *sWindowMap {
 		LB:      lb,
 		UB:      ub,
 		maxSize: sz,
-		pq:      nil,
 	}
 	return newMap
 }
@@ -37,7 +34,6 @@ func (m *sWindowMap) Put(sn int, elem *Message) bool {
 		m.mp[sn] = &unAckedMsgs{
 			msg:            elem,
 			currBackoff:    0,
-			nextBackoff:    1,
 			unAckedCounter: 0,
 		}
 		return true
@@ -110,14 +106,23 @@ func (m *sWindowMap) UpdateBackoffs(maxBackoff int) (*priorityQueue, bool) {
 	for _, v := range m.mp {
 		// update counter,
 		// if equal to next backoff, mark for resend, update backoffs
-		v.unAckedCounter++
-		if v.unAckedCounter == v.nextBackoff {
+		if v.unAckedCounter == v.currBackoff {
 			pq.Insert(v.msg)
-			interval := v.nextBackoff - v.currBackoff
-			v.currBackoff = v.nextBackoff
-			v.nextBackoff = v.nextBackoff + min(2*interval, maxBackoff)
+			if v.currBackoff == 0 {
+				v.currBackoff++
+			} else {
+				v.currBackoff = 2 * v.currBackoff
+			}
+			v.currBackoff = min(v.currBackoff, maxBackoff)
+			v.unAckedCounter = 0
+		} else {
+			v.unAckedCounter++
 		}
 	}
+	if pq.Empty() {
+		return nil, false
+	}
+
 	return pq, true
 }
 
