@@ -149,7 +149,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		pendingRead:  NewPQ(),
 		pendingWrite: NewPQ(),
 
-		logLvl: 2,
+		logLvl: 0,
 	}
 
 	// Launch Main Routine
@@ -233,8 +233,7 @@ func (c *client) main() {
 			cLog(c, "returning: main", 1)
 			return
 		case msg := <-c.msgSendChan:
-			cLog(c, fmt.Sprintf("send msg: %s | sn: %d\n", msg, c.currSeqNum), 2)
-			cLog(c, fmt.Sprintf("client: pre-send sWin state: %s\n", c.unAckedMsgs.String()), 2)
+			sWin1 := c.unAckedMsgs.String()
 			var sent bool
 			switch msg.Type {
 			case MsgConnect:
@@ -245,21 +244,27 @@ func (c *client) main() {
 				sent = processSendAcks(c, msg)
 			}
 			if sent {
-				cLog(c, "sent!", 2)
+				cLog(c, fmt.Sprintf("send msg: %s | sn: %d\n", msg, c.currSeqNum), 2)
 			} else {
-				cLog(c, "dropped!", 2)
+				cLog(c, fmt.Sprintf("dropped msg: %s | sn: %d\n", msg, c.currSeqNum), 2)
 			}
-			cLog(c, fmt.Sprintf("client: post-send sWin state: %s\n", c.unAckedMsgs.String()), 2)
+			sWin2 := c.unAckedMsgs.String()
+			if msg.Type == MsgData {
+				cLog(c, fmt.Sprintf("send: sWin: %s -> %s\n", sWin1, sWin2), 2)
+			}
 		case msg := <-c.msgRecvChan:
-			cLog(c, fmt.Sprintf("recv msg: %s | rsn: %d\n", msg, c.readSeqNum), 2)
-			cLog(c, fmt.Sprintf("client: pre-recv sWin state: %s\n", c.unAckedMsgs.String()), 2)
+			cLog(c, fmt.Sprintf("recv'd msg: %s | rsn: %d\n", msg, c.readSeqNum), 2)
+			sWin1 := c.unAckedMsgs.String()
 			switch msg.Type {
 			case MsgData:
 				processRecvData(c, msg)
 			case MsgAck, MsgCAck:
 				processRecvAcks(c, msg)
 			}
-			cLog(c, fmt.Sprintf("client: pre-recv sWin state: %s\n", c.unAckedMsgs.String()), 2)
+			sWin2 := c.unAckedMsgs.String()
+			if msg.Type == MsgAck && msg.SeqNum != 0 {
+				cLog(c, fmt.Sprintf("recv: sWin: %s -> %s\n", sWin1, sWin2), 2)
+			}
 		case req := <-c.processInternal:
 			switch req.mtype {
 			case ID:
@@ -336,11 +341,7 @@ func (c *client) reader() {
 			err := recvFromServer(c.clientConn, &msg)
 			if err == nil {
 				c.msgRecvChan <- &msg
-				cLog(c, "recv'd!", 2)
-			} else {
-				cLog(c, fmt.Sprintf("dropped: %v\n", err), 2)
 			}
-
 		}
 	}
 }

@@ -141,10 +141,9 @@ func processRecvData(c *client, msg *Message) {
 	c.resetEp <- 1
 	if c.processRead {
 		pqmsg, exist := c.pendingRead.GetMin()
-		cLog(c, fmt.Sprintf("read: pq rmMin msg: %s\n", pqmsg), 2)
 		if exist == nil && pqmsg.SeqNum == c.readSeqNum {
 			_, err := c.pendingRead.RemoveMin()
-
+			cLog(c, fmt.Sprintf("read: pq rmMin msg: %s\n", pqmsg), 2)
 			c.readReturnChan <- &internalMsg{mtype: Read, msg: pqmsg, err: err}
 			c.processRead = false
 			c.readSeqNum++
