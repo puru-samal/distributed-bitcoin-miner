@@ -191,3 +191,9 @@ func (m *sWindowMap) updateBound() {
 	m.UB++
 	m.ackdSNs = m.ackdSNs[i+1:]
 }
+
+func (c *clientInfo) isValidMessage(seqNum int) bool {
+	windowBound := c.unAckedMsgs.isValidKey(seqNum)
+	maxUnAckedBound := len(c.unAckedMsgs.mp) < c.unAckedMsgs.maxSize
+	return windowBound && maxUnAckedBound
+}

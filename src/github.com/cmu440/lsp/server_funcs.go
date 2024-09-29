@@ -159,12 +159,13 @@ func (s *server) defaultActions() {
 	for _, client := range s.clientInfo {
 		if !client.pendingMsgs.Empty() {
 			item, _ := client.pendingMsgs.RemoveMin()
-			if client.unAckedMsgs.isValidKey(item.SeqNum) || client.unAckedMsgs.Empty() {
+			if client.isValidMessage(item.SeqNum) || client.unAckedMsgs.Empty() {
 				err := s.sendMessage(item, client.addr)
 				if err != nil {
 					log.Println(err)
 				}
 				client.unAckedMsgs.Put(item.SeqNum, item)
+				//log.Println("[defaultActions] client.unAckedMsgs: ", len(client.unAckedMsgs.mp), client.unAckedMsgs.maxSize)
 			} else {
 				client.pendingMsgs.Insert(item)
 			}

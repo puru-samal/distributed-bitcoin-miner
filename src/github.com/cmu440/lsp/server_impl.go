@@ -36,7 +36,6 @@ type server struct {
 	isClosed             bool
 	serverShutdownChan   chan bool
 	shutdownCompleteChan chan bool
-	connectionLostChan   chan bool
 }
 
 // clientMessage contains a message and the address of the client that sent it
@@ -113,14 +112,11 @@ func NewServer(port int, params *Params) (Server, error) {
 		isClosed:             false,
 		serverShutdownChan:   make(chan bool),
 		shutdownCompleteChan: make(chan bool),
-		connectionLostChan:   make(chan bool),
 	}
 
 	go server.handleIncomingMessages()
 
 	go server.serverMain()
-
-	go server.monitorDisconnectedClients()
 
 	return server, nil
 }
@@ -229,26 +225,26 @@ func (s *server) handleIncomingMessages() {
 	}
 }
 
-// monitorDisconnectedClients monitors the connectionLostChan for disconnected clients
-func (s *server) monitorDisconnectedClients() {
-	for {
-		select {
-		case <-s.connectionLostChan:
-			return
-		}
-	}
-}
-
 // Read reads a message from a client. If the server is closed, it returns an error
 func (s *server) Read() (int, []byte, error) {
 	for {
 		s.readRequestChan <- true
-		if readRes := <-s.readResponseChan; readRes.payload != nil {
+		readRes, ok := <-s.readResponseChan
+		if !ok {
+			return readRes.connID, nil, errors.New("client connection does not exist")
+		}
+
+		if readRes.payload != nil {
 			return readRes.connID, readRes.payload, nil
 		} else if readRes.connID != -1 {
 			s.removeClientChan <- readRes.connID
-			return readRes.connID, nil, errors.New("server is closed")
+			return readRes.connID, nil, errors.New("need to delete client")
 		}
+
+		if s.isClosed {
+			return 0, nil, errors.New("server is closed")
+		}
+
 		time.Sleep(time.Millisecond)
 	}
 }
@@ -273,7 +269,6 @@ func (s *server) CloseConn(connId int) error {
 func (s *server) Close() error {
 	defer s.conn.Close()
 	s.isClosed = true
-	s.connectionLostChan <- true
 	<-s.shutdownCompleteChan
 	s.serverShutdownChan <- true
 	return nil
