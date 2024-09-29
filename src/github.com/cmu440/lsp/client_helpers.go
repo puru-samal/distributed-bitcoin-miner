@@ -22,7 +22,7 @@ func cLog(c *client, str string, lvl int) {
 	}
 }
 
-// Helper funcs
+// General Utility Helpers
 
 func sendToServer(conn *lspnet.UDPConn, msg *Message) bool {
 	byt, err := json.Marshal(msg)
@@ -47,67 +47,103 @@ func checkIntegrity(msg *Message) bool {
 	if len(msg.Payload) < msg.Size {
 		return false
 	}
-	checksum := CalculateChecksum(msg.ConnID, msg.SeqNum, msg.Size, msg.Payload)
 	msg.Payload = msg.Payload[:msg.Size]
+	checksum := CalculateChecksum(msg.ConnID, msg.SeqNum, msg.Size, msg.Payload)
 	return msg.Checksum == checksum
 }
 
-// Sends NewConnect and inits client state before connect
-// unAckedMsgs on init are 1-sized window with lowerbound currSeqNum
-// An Ack message has to match and remove MsgConnect
-// Only then, a connection is declared to be successful
+func initClientAfterConnect(c *client, msg *Message) {
+	c.connID = msg.ConnID
+	c.state = Active
+	LB := c.writeSeqNum + 1
+	UB := LB + c.params.WindowSize
+	mSz := min(c.params.MaxUnackedMessages, c.params.WindowSize)
+	c.unAckedMsgs.Reinit(LB, UB, mSz)
+	c.returnNewClient <- 1
+}
+
+// Assigns a ConnID, SeqNum, Checksum to a message sent my write request
+func validateWriteInternal(c *client, req *internalMsg) {
+	if c.state == Lost || c.state == Closing {
+		req.err = errors.New("Server connection lost")
+	}
+	checksum := CalculateChecksum(c.connID, c.writeSeqNum, len(req.msg.Payload), req.msg.Payload)
+	req.msg.ConnID = c.connID
+	req.msg.SeqNum = c.writeSeqNum
+	req.msg.Checksum = checksum
+	req.err = nil
+}
+
+func returnAll(c *client) {
+	c.returnMain <- 1
+	c.returnReader <- 1
+	c.returnTimer <- 1
+}
+
+// Message Sending
+
+// Sent a NewConnect Message
 func processSendConnect(c *client, msg *Message) bool {
 	sent := false
-	if !(c.state == Connect && msg.Type == MsgConnect) {
+	if !(c.state == Connect) {
 		return sent
 	}
-	LB := c.currSeqNum
-	UB := c.currSeqNum + 1
+	LB := c.writeSeqNum
+	UB := c.writeSeqNum + 1
 	mSz := 1
 	c.unAckedMsgs.Reinit(LB, UB, mSz)
-	c.unAckedMsgs.Put(c.currSeqNum, msg)
+	c.unAckedMsgs.Put(c.writeSeqNum, msg)
 	sent = sendToServer(c.clientConn, msg)
-	if c.pendingConn {
-		c.processRetry <- 1
-		c.pendingConn = false
+	return sent
+}
+
+// Attempt to put in sliding window,
+// If valid, send, else put in pendingWrite
+func processSendNewData(c *client, msg *Message) bool {
+	sent := false
+	if !(c.state == Active) || (c.state == Closing) {
+		return sent
+	}
+	isValid := c.unAckedMsgs.Put(msg.SeqNum, msg)
+	if isValid {
+		sent = sendToServer(c.clientConn, msg)
+	} else {
+		c.pendingWrite.Insert(msg)
 	}
 	return sent
 }
 
-// Only Active || Closing state can send data messages
-// If message has not been Ack'd, send
-// If message is new, new messages are dropped while Close has been called
-//
-//		 Attempt to put in sliding window
-//	     if sucessful, send
-//	     if dropped, restore currSeqNum state
-//
-// TODO: Resend messages in unAckedMsgs on epochFire acc to backoff rules
-func processSendData(c *client, msg *Message) bool {
+// Resend NewConnect to server
+func processReSendConnect(c *client) bool {
+	msg := NewConnect(c.writeSeqNum)
+	sent := sendToServer(c.clientConn, msg)
+	return sent
+}
+
+// Update backoffs and get a priority queue of messages to be send
+// if priority queue is empty, send heartbeat instead
+func processReSendDataOrHeartbeat(c *client) bool {
 	sent := false
 	if !(c.state == Active || c.state == Closing) {
 		return sent
 	}
-	isUnAcked := c.unAckedMsgs.In(msg.SeqNum)
-	if isUnAcked { // Old Message
-		sent = sendToServer(c.clientConn, msg)
-		c.processRetry <- 1
-	} else { // New Data Message
-
-		if c.state == Closing {
-			return sent
-		}
-		isValid := c.unAckedMsgs.Put(msg.SeqNum, msg)
-		if isValid {
+	retryMsgs, exist := c.unAckedMsgs.UpdateBackoffs(c.params.MaxBackOffInterval)
+	if exist {
+		cLog(c, fmt.Sprintf("unacked pq: %v\n", retryMsgs.q), 2)
+		for !retryMsgs.Empty() {
+			msg, _ := retryMsgs.RemoveMin()
 			sent = sendToServer(c.clientConn, msg)
-		} else {
-			// Dropped, Put in pending PQ
-			c.pendingWrite.Insert(msg)
+			cLog(c, "retry processing..", 2)
 		}
+		cLog(c, "retry processed", 2)
+	} else {
+		heartbeat := NewAck(c.connID, 0)
+		sent = processSendAcks(c, heartbeat)
 	}
 	return sent
 }
 
+// Just sent an ack to server
 func processSendAcks(c *client, msg *Message) bool {
 	sent := false
 	if !(c.state == Active || c.state == Closing) {
@@ -115,17 +151,17 @@ func processSendAcks(c *client, msg *Message) bool {
 	}
 	sent = sendToServer(c.clientConn, msg)
 	if msg.SeqNum == 0 {
-		cLog(c, "client: heartbeat!", 2)
-		c.processRetry <- 1
+		cLog(c, "[HEARTBEAT: client]", 2)
 	}
 	return sent
 }
 
-// Handles possible duplicates based on currSeqNum + window
-// If in the valid range, puts in priorityQueue
-// If read has been called, get the highest priority message
-// If the message sn matches currSeqNum, remove from priority queue
-// and send to read and mark read as having been processed
+// Message Receiving
+
+// Check data message's validity, and either
+// Mark as toBeRead for processing when read is called
+// Or put in pendingRead
+// Reset epochLimit
 func processRecvData(c *client, msg *Message) {
 	if c.state != Active {
 		return
@@ -133,27 +169,26 @@ func processRecvData(c *client, msg *Message) {
 
 	LB, UB := c.readSeqNum, c.readSeqNum+c.params.WindowSize
 	if LB <= msg.SeqNum && msg.SeqNum < UB {
-		if checkIntegrity(msg) {
-			c.pendingRead.Insert(msg)
+		hasIntegrity := checkIntegrity(msg)
+		if hasIntegrity {
+			if msg.SeqNum == c.readSeqNum {
+				cLog(c, fmt.Sprintf("set [toBeRead]: %s\n", msg), 2)
+				c.toBeRead = &internalMsg{mtype: Read, msg: msg, err: nil}
+			} else {
+				c.pendingRead.Insert(msg)
+			}
 		}
 	}
-	c.msgAckChan <- NewAck(c.connID, msg.SeqNum)
-	c.resetEp <- 1
-	if c.processRead {
-		pqmsg, exist := c.pendingRead.GetMin()
-		if exist == nil && pqmsg.SeqNum == c.readSeqNum {
-			_, err := c.pendingRead.RemoveMin()
-			cLog(c, fmt.Sprintf("read: pq rmMin msg: %s\n", pqmsg), 2)
-			c.readReturnChan <- &internalMsg{mtype: Read, msg: pqmsg, err: err}
-			c.processRead = false
-			c.readSeqNum++
-		}
-	}
+
+	ackMsg := NewAck(c.connID, msg.SeqNum)
+	processSendAcks(c, ackMsg)
+	c.resetEpLimit <- 1
 }
 
-// Handle server heartbeat by resetting the eps and epsLimit timers
-// For non-heartbeatAcks, matches msg sn with unAck'd msgs sn.
-// Removes the message from the unAck's msgs sWin if match
+// Connect : If valid ack for connect, init sliding window, signal NewClient to return
+// Active  : If ack matches seqNum in sliding window => data has been recvd, remove from window
+// Attempt to put the lowest priority item in pendingWrite into the sliding window
+// Reset epochLimit
 func processRecvAcks(c *client, msg *Message) {
 	if c.state == Connect {
 		if msg.ConnID != 0 {
@@ -163,55 +198,17 @@ func processRecvAcks(c *client, msg *Message) {
 			}
 		}
 	} else {
-		c.unAckedMsgs.Remove(msg.SeqNum)
 		if msg.SeqNum == 0 {
-			cLog(c, "server: heartbeat!", 2)
+			cLog(c, "[HEARTBEAT: server]", 2)
 		}
-		if c.processWrite {
-			pqmsg, exist := c.pendingWrite.GetMin()
-			if exist == nil && c.unAckedMsgs.isValidKey(pqmsg.SeqNum) {
-				c.pendingWrite.RemoveMin()
-				cLog(c, fmt.Sprintf("pq rmMin msg (pending write): %s\n", msg), 3)
-				c.msgDataChan <- pqmsg
-				c.processWrite = false
-			}
+		c.unAckedMsgs.Remove(msg.SeqNum)
+		pqmsg, exist := c.pendingWrite.GetMin()
+		if exist == nil && c.unAckedMsgs.Put(pqmsg.SeqNum, pqmsg) {
+			c.pendingWrite.RemoveMin()
+			cLog(c, fmt.Sprintf("preparing (pending write): %s\n", pqmsg), 2)
 		}
 
 	}
 	cLog(c, "EpochLimit reset", 3)
-	c.resetEp <- 1
-}
-
-// Handles client state after recieving an Ack for a NewConnect meddage
-// Resize sliding window to [currSeqNum+1, currSeqNum+1+window) (for next data message)
-// Change client state and signal NewClient to return
-func initClientAfterConnect(c *client, msg *Message) {
-	c.connID = msg.ConnID
-	c.state = Active
-	LB := c.currSeqNum + 1
-	UB := LB + c.params.WindowSize
-	mSz := c.params.MaxUnackedMessages
-	c.unAckedMsgs.Reinit(LB, UB, mSz)
-	c.returnNewClient <- 1
-}
-
-func validateWriteInternal(c *client, req *internalMsg) {
-	if c.state == Lost || c.state == Closing {
-		req.err = errors.New("Server connection lost")
-	}
-	checksum := CalculateChecksum(c.connID, c.currSeqNum, len(req.msg.Payload), req.msg.Payload)
-	req.msg.ConnID = c.connID
-	req.msg.SeqNum = c.currSeqNum
-	req.msg.Checksum = checksum
-	req.err = nil
-}
-
-func cStateString(state ClientState) string {
-	switch state {
-	case Connect:
-		return "Connect"
-	case Active:
-		return "Active"
-	}
-	return ""
+	c.resetEpLimit <- 1
 }

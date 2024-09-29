@@ -37,40 +37,33 @@ type client struct {
 	clientConn  *lspnet.UDPConn
 	params      *Params
 	connID      int
-	currSeqNum  int
+	writeSeqNum int
 	readSeqNum  int
-	connLost    chan int
-	pendingConn bool
+	connFailed  chan int
 
 	// Return signals
 	returnNewClient chan int
 	returnMain      chan int
 	returnReader    chan int
 	returnTimer     chan int
-	returnRetry     chan int
 
 	// Read | Write | ConnID
-	processRead      bool
-	processWrite     bool
-	readReturnChan   chan *internalMsg
-	connIDReturnChan chan *internalMsg
-	writeReturnChan  chan *internalMsg
-	closeMsgChan     chan *Message
-	closeReturnChan  chan *internalMsg
-	processInternal  chan *internalMsg
-	processRetry     chan int
+	toBeRead            *internalMsg
+	readReturnChan      chan *internalMsg
+	connIDReturnChan    chan *internalMsg
+	writeReturnChan     chan *internalMsg
+	closeProcessingChan chan int
+	closeReturnChan     chan *internalMsg
+	processInternal     chan *internalMsg
 
 	// TODO: timing
-	epFire    chan int
-	epLimFire chan int
-	resetEp   chan int
+	epFire       chan int
+	epLimFire    chan int
+	resetEpLimit chan int
 
 	// msg send/recv/retry
-	msgSendChan  chan *Message
-	msgRecvChan  chan *Message
-	msgRetryChan chan *priorityQueue
-	msgAckChan   chan *Message
-	msgDataChan  chan *Message
+	newMsgSendChan chan *Message
+	msgRecvChan    chan *Message
 
 	// internal data structures
 	unAckedMsgs  *sWindowMap
@@ -115,39 +108,32 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		clientConn:  conn,
 		params:      params,
 		connID:      0,
-		currSeqNum:  initialSeqNum,
+		writeSeqNum: initialSeqNum,
 		readSeqNum:  initialSeqNum + 1,
-		connLost:    make(chan int),
-		pendingConn: false,
+		connFailed:  make(chan int),
 
 		returnNewClient: make(chan int),
 		returnMain:      make(chan int),
 		returnReader:    make(chan int),
 		returnTimer:     make(chan int),
-		returnRetry:     make(chan int),
 
-		processRead:      false,
-		processWrite:     false,
-		readReturnChan:   make(chan *internalMsg),
-		writeReturnChan:  make(chan *internalMsg),
-		connIDReturnChan: make(chan *internalMsg),
-		closeReturnChan:  make(chan *internalMsg),
-		processInternal:  make(chan *internalMsg),
-		processRetry:     make(chan int),
+		readReturnChan:      make(chan *internalMsg),
+		toBeRead:            nil,
+		writeReturnChan:     make(chan *internalMsg),
+		connIDReturnChan:    make(chan *internalMsg),
+		closeProcessingChan: make(chan int),
+		closeReturnChan:     make(chan *internalMsg),
+		processInternal:     make(chan *internalMsg),
 
-		epFire:    make(chan int),
-		epLimFire: make(chan int),
-		resetEp:   make(chan int),
+		epFire:       make(chan int),
+		epLimFire:    make(chan int),
+		resetEpLimit: make(chan int),
 
-		msgSendChan:  make(chan *Message),
-		msgRecvChan:  make(chan *Message),
-		msgRetryChan: make(chan *priorityQueue),
-		msgAckChan:   make(chan *Message),
-		msgDataChan:  make(chan *Message),
-
-		unAckedMsgs:  NewSWM(0, 1, 1),
-		pendingRead:  NewPQ(),
-		pendingWrite: NewPQ(),
+		newMsgSendChan: make(chan *Message),
+		msgRecvChan:    make(chan *Message),
+		unAckedMsgs:    NewSWM(0, 1, 1),
+		pendingRead:    NewPQ(),
+		pendingWrite:   NewPQ(),
 
 		logLvl: 0,
 	}
@@ -158,13 +144,13 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	go c.main()
 	go c.reader()
 	go c.timer()
-	go c.redirect()
 
 	// Signal main to send NewConnect message
 	// Block until connID set or EpochLimit reached
-	c.msgSendChan <- NewConnect(initialSeqNum)
+	c.newMsgSendChan <- NewConnect(initialSeqNum)
 	select {
-	case <-c.connLost:
+	case <-c.connFailed:
+		returnAll(c)
 		return nil, errors.New("connection could not be established")
 	case <-c.returnNewClient:
 		log.Println("Client -> Connected!")
@@ -176,155 +162,147 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 // Sends an internalMsg to Main
 // Main processes the request and sends a response with the clients connID
 func (c *client) ConnID() int {
-	cLog(c, "Client connid!", 1)
+	cLog(c, "[Client ConnID]", 1)
 	c.processInternal <- &internalMsg{mtype: ID}
 	req := <-c.connIDReturnChan
 	return req.id
 }
 
 // Sends an internalMsg to Main
-// Main blocks until the data message with sn:currSeqNum is available
+// Main blocks until the data message with sn:writeSeqNum is available
 // Once available, Read returns
 func (c *client) Read() ([]byte, error) {
-	cLog(c, "Client read!", 1)
-	c.processInternal <- &internalMsg{mtype: Read}
+	cLog(c, "[Client Read]", 1)
 	resp := <-c.readReturnChan
-	cLog(c, "Client returning read!", 1)
 	return resp.msg.Payload, resp.err
 }
 
 // Creates and sends a data message with 0 id, sn, checksum
-// Main validates (assigns id, sn, checksum, errors) and sends the the message back to Write
-// Write then sends the message to it to Main if there's no errors
+// Main validates (assigns id, sn, checksum, errors) and sends the the message
+// Sends the err back to Write
 func (c *client) Write(payload []byte) error {
-	cLog(c, "Client write!", 1)
+	cLog(c, "[Client Write]", 1)
 	wr_msg := NewData(0, 0, len(payload), payload, 0)
 	c.processInternal <- &internalMsg{mtype: Write, msg: wr_msg}
 	resp := <-c.writeReturnChan
-	if resp.err == nil {
-		c.msgSendChan <- resp.msg
-	}
 	return resp.err
 }
 
 // TODO:
 func (c *client) Close() error {
-	cLog(c, "Client close!", 1)
+	cLog(c, "[Client close]", 1)
+	c.processInternal <- &internalMsg{mtype: Close}
 	for {
-		c.processInternal <- &internalMsg{mtype: Close}
 		select {
 		case req := <-c.closeReturnChan:
-			cLog(c, "close: pending msgs processed, returning.", 1)
 			c.returnMain <- 1
 			c.returnReader <- 1
 			c.returnTimer <- 1
 			return req.err
 
-		case msg := <-c.closeMsgChan:
-			c.msgSendChan <- msg
+		case <-c.closeProcessingChan:
+			c.processInternal <- &internalMsg{mtype: Close}
 		}
 	}
 }
 
 func (c *client) main() {
 	for {
+		var readActiveChan chan *internalMsg
+		if c.toBeRead != nil {
+			cLog(c, "[readActiveChan] activated", 1)
+			readActiveChan = c.readReturnChan
+		}
+
 		select {
 		case <-c.returnMain:
-			cLog(c, "returning: main", 1)
+			cLog(c, "[returnMain]", 1)
 			return
-		case msg := <-c.msgSendChan:
-			sWin1 := c.unAckedMsgs.String()
-			var sent bool
+
+		case msg := <-c.newMsgSendChan:
+
+			cLog(c, "[newMsgSendChan]", 1)
 			switch msg.Type {
 			case MsgConnect:
-				sent = processSendConnect(c, msg)
+				cLog(c, " :Connect", 1)
+				processSendConnect(c, msg)
 			case MsgData:
-				sent = processSendData(c, msg)
-			case MsgAck, MsgCAck:
-				sent = processSendAcks(c, msg)
+				cLog(c, fmt.Sprintf("[Data]: %s\n", msg), 1)
+				processSendNewData(c, msg)
 			}
-			if sent {
-				cLog(c, fmt.Sprintf("send msg: %s | sn: %d\n", msg, c.currSeqNum), 2)
-			} else {
-				cLog(c, fmt.Sprintf("dropped msg: %s | sn: %d\n", msg, c.currSeqNum), 2)
-			}
-			sWin2 := c.unAckedMsgs.String()
-			if msg.Type == MsgData {
-				cLog(c, fmt.Sprintf("send: sWin: %s -> %s\n", sWin1, sWin2), 2)
-			}
+
 		case msg := <-c.msgRecvChan:
-			cLog(c, fmt.Sprintf("recv'd msg: %s | rsn: %d\n", msg, c.readSeqNum), 2)
-			sWin1 := c.unAckedMsgs.String()
+
+			cLog(c, "[msgRecvChan]", 1)
 			switch msg.Type {
 			case MsgData:
+				cLog(c, fmt.Sprintf("[Data]: %s\n", msg), 1)
 				processRecvData(c, msg)
 			case MsgAck, MsgCAck:
+				cLog(c, fmt.Sprintf("[Ack]: %s\n", msg), 1)
 				processRecvAcks(c, msg)
 			}
-			sWin2 := c.unAckedMsgs.String()
-			if msg.Type == MsgAck && msg.SeqNum != 0 {
-				cLog(c, fmt.Sprintf("recv: sWin: %s -> %s\n", sWin1, sWin2), 2)
-			}
+
 		case req := <-c.processInternal:
+			cLog(c, "[procInternal]", 1)
 			switch req.mtype {
 			case ID:
 				c.connIDReturnChan <- &internalMsg{mtype: ID, id: c.connID}
-			case Read:
-				c.processRead = true
 			case Write:
-				// Assign checksum, connID, seqNum to a data msg within request
-				// Assign err (if any)(TODO: Handle non-nil error on lost connection)
-				// Then send back to Write
-				c.processWrite = true
-				c.currSeqNum++
-				cLog(c, fmt.Sprintf("pre-validated: %s\n", req.msg), 4)
+				c.writeSeqNum++
 				validateWriteInternal(c, req)
-				cLog(c, fmt.Sprintf("post-validated: %s\n", req.msg), 4)
-				if c.state == Closing {
-					req.err = errors.New("client closed")
+				if c.state == Closing || c.state == Lost {
+					req.err = errors.New("client closed/lost")
 				}
+				processSendNewData(c, req.msg)
 				c.writeReturnChan <- req
+				cLog(c, fmt.Sprintf("[Write proc'd] %s\n", req.msg), 1)
+
 			case Close:
-				// TODO: While theres unAckd's messages
-				// TODO: Get message with the lowest sn
-				// TODO: Send data msgs to the closeMsgChan
-				// TODO: closeMsgChan in Close forwards it to msgSendChan (new Close State required ?)
-				// TODO: Acks recieved in msgRecvChan will remove the items (new Close State required ?)
-				// TODO: Then, Close will send another InternalRequest
-				// TODO: Only when unAckedMsgs is empty or connection has been lost,
-				// TODO: closeReturnChan <- 1 will prompt close to return
+				// TODO: Send all msgs in Unacked messages
+				// TODO: Send 0 to closeProcessingChan
 				c.state = Closing
-				msg, exist := c.unAckedMsgs.GetMinMsg()
-				if exist {
-					c.closeMsgChan <- msg
+				if !c.unAckedMsgs.Empty() {
+					for !c.unAckedMsgs.Empty() {
+						msg, _ := c.unAckedMsgs.GetMinMsg()
+						sendToServer(c.clientConn, msg)
+					}
+					c.closeProcessingChan <- 1
 				} else {
 					c.clientConn.Close()
 					c.closeReturnChan <- &internalMsg{mtype: Close, err: nil}
 				}
 			}
+		case readActiveChan <- c.toBeRead:
+
+			cLog(c, fmt.Sprintf("[!Read] %s\n", c.toBeRead.msg), 1)
+			c.readSeqNum++
+			c.toBeRead = nil
+			if pqmsg, exist := c.pendingRead.GetMin(); exist == nil && pqmsg.SeqNum == c.readSeqNum {
+				_, err := c.pendingRead.RemoveMin()
+				cLog(c, fmt.Sprintf("read: pq rmMin msg: %s\n", pqmsg), 2)
+				c.toBeRead = &internalMsg{mtype: Read, msg: pqmsg, err: err}
+			}
+
 		case <-c.epFire:
-			cLog(c, "Epoch Fire!", 2)
+
+			cLog(c, "[epFire]", 2)
 			if c.state == Connect {
-				PQ := NewPQ()
-				PQ.Insert(NewConnect(c.currSeqNum))
-				c.pendingConn = true
-				c.msgRetryChan <- PQ
+				processReSendConnect(c)
 			} else {
-				retryMsgs, exist := c.unAckedMsgs.UpdateBackoffs(c.params.MaxBackOffInterval)
-				if exist {
-					cLog(c, fmt.Sprintf("unacked pq: %v\n", retryMsgs.q), 2)
-					c.msgRetryChan <- retryMsgs
-				} else {
-					PQ := NewPQ()
-					PQ.Insert(NewAck(c.connID, 0))
-					c.msgRetryChan <- PQ
-				}
+				processReSendDataOrHeartbeat(c)
 			}
 
 		case <-c.epLimFire:
-			// TODO:
-			cLog(c, "EpochLimit Fire!", 3)
-
+			cLog(c, "[epLimFire]", 2)
+			if c.state == Connect {
+				c.connFailed <- 1
+			} else {
+				c.state = Lost
+				c.returnReader <- 1
+				c.returnTimer <- 1
+				return
+			}
 		}
 	}
 }
@@ -332,7 +310,6 @@ func (c *client) main() {
 func (c *client) reader() {
 	for {
 		select {
-		// handle termination due to server Close
 		case <-c.returnReader:
 			cLog(c, "returning: reader", 1)
 			return
@@ -361,29 +338,8 @@ func (c *client) timer() {
 		case <-epochLimitTimer.C: // Epoch Limit tick
 			c.epLimFire <- 1
 
-		case <-c.resetEp:
+		case <-c.resetEpLimit:
 			epochLimitTimer.Reset(time.Duration(c.params.EpochMillis*c.params.EpochLimit) * time.Millisecond)
-		}
-	}
-}
-
-func (c *client) redirect() {
-	for {
-		select {
-		case <-c.returnRetry:
-			cLog(c, "returning: redirect", 3)
-			return
-		case pq := <-c.msgRetryChan:
-			cLog(c, fmt.Sprintf("recv retry queue: %v\n", pq.q), 3)
-			for !pq.Empty() {
-				msg, _ := pq.RemoveMin()
-				c.msgSendChan <- msg
-				<-c.processRetry
-			}
-		case msg := <-c.msgAckChan:
-			c.msgSendChan <- msg
-		case msg := <-c.msgDataChan:
-			c.msgSendChan <- msg
 		}
 	}
 }

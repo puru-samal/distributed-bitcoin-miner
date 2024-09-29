@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"fmt"
+	"sort"
 )
 
 type unAckedMsgs struct {
@@ -15,6 +16,7 @@ type sWindowMap struct {
 	LB      int // Lower bound (inclusive)
 	UB      int // Upper bound (exclusive)
 	maxSize int
+	ackdSNs []int
 }
 
 /** API **/
@@ -25,6 +27,7 @@ func NewSWM(lb int, ub int, sz int) *sWindowMap {
 		LB:      lb,
 		UB:      ub,
 		maxSize: sz,
+		ackdSNs: make([]int, 0),
 	}
 	return newMap
 }
@@ -55,10 +58,12 @@ func (m *sWindowMap) Remove(sn int) (*Message, bool) {
 	msg, exist := m.Get(sn)
 	if exist {
 		delete(m.mp, sn)
-		if sn == m.LB {
-			m.LB++
-			m.UB++
-		}
+		m.ackdSNs = append(m.ackdSNs, sn)
+		//if sn == m.LB {
+		//	m.LB++
+		//	m.UB++
+		//}
+		m.updateBound()
 		return msg, exist
 	}
 	return nil, exist
@@ -99,10 +104,12 @@ func (m *sWindowMap) GetMinMsg() (*Message, bool) {
 }
 
 func (m *sWindowMap) UpdateBackoffs(maxBackoff int) (*priorityQueue, bool) {
-	if m.Empty() {
-		return nil, false
-	}
 	pq := NewPQ()
+
+	if m.Empty() {
+		return pq, false
+	}
+
 	for _, v := range m.mp {
 		// update counter,
 		// if equal to next backoff, mark for resend, update backoffs
@@ -119,8 +126,9 @@ func (m *sWindowMap) UpdateBackoffs(maxBackoff int) (*priorityQueue, bool) {
 			v.unAckedCounter++
 		}
 	}
+
 	if pq.Empty() {
-		return nil, false
+		return pq, false
 	}
 
 	return pq, true
@@ -145,4 +153,41 @@ func min(a int, b int) int {
 		return a
 	}
 	return b
+}
+
+func (m *sWindowMap) updateBound() {
+	if len(m.ackdSNs) == 0 {
+		return
+	}
+	// Sort the array
+	sort.Ints(m.ackdSNs)
+
+	// If the first element is not the lower bound, return as is
+	if m.ackdSNs[0] != m.LB {
+		return
+	}
+
+	// Iterate over the array and update the lower bound
+	var i int
+	for i = 0; i < len(m.ackdSNs)-1; i++ {
+		if m.ackdSNs[i+1]-m.ackdSNs[i] == 1 {
+			m.LB++
+			m.UB++
+		} else {
+			break
+		}
+	}
+
+	// If all elements are consecutive, return updated lower bound and an empty slice
+	if i == len(m.ackdSNs)-1 {
+		m.LB++
+		m.UB++
+		m.ackdSNs = []int{}
+		return
+	}
+
+	// Return the updated lower bound and the remaining slice
+	m.LB++
+	m.UB++
+	m.ackdSNs = m.ackdSNs[i+1:]
 }
