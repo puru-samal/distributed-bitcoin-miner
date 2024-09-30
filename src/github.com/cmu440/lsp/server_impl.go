@@ -207,7 +207,25 @@ func (s *server) serverMain() {
 
 		default:
 			sLog(s, "[Server default]", 1)
-			s.defaultActions()
+			for _, client := range s.clientInfo {
+				if client.pendingMsgs.Size() > 0 {
+					msg, _ := client.pendingMsgs.RemoveMin()
+					if client.isValidMessage(msg.SeqNum) || client.unAckedMsgs.Empty() {
+						err := s.sendMessage(msg, client.addr)
+						if err != nil {
+							log.Println(err)
+						}
+						insertFail := client.unAckedMsgs.Put(msg.SeqNum, msg)
+						if !insertFail {
+							sLog(s, "[defaultActions] Error inserting into unAckedMsgs", 2)
+						} else {
+							sLog(s, fmt.Sprintln("[defaultActions] Inserted into unAckedMsgs: ", msg.SeqNum, "of", msg.ConnID), 4)
+						}
+					} else {
+						client.pendingMsgs.Insert(msg)
+					}
+				}
+			}
 		}
 	}
 }

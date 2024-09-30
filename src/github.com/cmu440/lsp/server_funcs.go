@@ -58,7 +58,7 @@ func (s *server) checkConnection(clientMsg *clientMessage, clientAddr *lspnet.UD
 	if err != nil {
 		sLog(s, err.Error(), 2)
 	} else {
-		sLog(s, fmt.Sprintln("[checkConnection] Sent newAck", newAck), 4)
+		sLog(s, fmt.Sprintln("Sent newAck", newAck), 4)
 	}
 
 	LB := clientMsg.message.SeqNum + 1
@@ -94,7 +94,7 @@ func (s *server) DataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAdd
 	if err != nil {
 		sLog(s, err.Error(), 2)
 	} else {
-		sLog(s, fmt.Sprintln("[DataHandler] Sent Ack", ack), 4)
+		sLog(s, fmt.Sprintln("[DataHandler] Sent SeqNum", ack.SeqNum, "of", connID), 4)
 	}
 	client.hasSentData = true
 }
@@ -108,7 +108,7 @@ func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) 
 	_, success := client.unAckedMsgs.Remove(clientMsg.message.SeqNum)
 
 	if success {
-		sLog(s, fmt.Sprintln("[AckHandler] Removed message from unAckedMsgs", clientMsg.message.SeqNum), 4)
+		sLog(s, fmt.Sprintln("Removed message from unAckedMsgs", clientMsg.message.SeqNum, "of", clientMsg.message.ConnID), 4)
 	}
 	if !success {
 		sLog(s, "[AckHandler] Error removing message from unAckedMsgs", 2)
@@ -167,27 +167,27 @@ func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 	}
 }
 
-func (s *server) defaultActions() {
-	for _, client := range s.clientInfo {
-		if client.pendingMsgs.Size() > 0 {
-			msg, _ := client.pendingMsgs.RemoveMin()
-			if client.isValidMessage(msg.SeqNum) || client.unAckedMsgs.Empty() {
-				err := s.sendMessage(msg, client.addr)
-				if err != nil {
-					log.Println(err)
-				}
-				insertFail := client.unAckedMsgs.Put(msg.SeqNum, msg)
-				if !insertFail {
-					sLog(s, "[defaultActions] Error inserting into unAckedMsgs", 2)
-				} else {
-					sLog(s, fmt.Sprintln("[defaultActions] Inserted into unAckedMsgs: ", msg.SeqNum), 4)
-				}
-			} else {
-				client.pendingMsgs.Insert(msg)
-			}
-		}
-	}
-}
+// func (s *server) defaultActions() {
+// 	for _, client := range s.clientInfo {
+// 		if client.pendingMsgs.Size() > 0 {
+// 			msg, _ := client.pendingMsgs.RemoveMin()
+// 			if client.isValidMessage(msg.SeqNum) || client.unAckedMsgs.Empty() {
+// 				err := s.sendMessage(msg, client.addr)
+// 				if err != nil {
+// 					log.Println(err)
+// 				}
+// 				insertFail := client.unAckedMsgs.Put(msg.SeqNum, msg)
+// 				if !insertFail {
+// 					sLog(s, "[defaultActions] Error inserting into unAckedMsgs", 2)
+// 				} else {
+// 					sLog(s, fmt.Sprintln("[defaultActions] Inserted into unAckedMsgs: ", msg.SeqNum), 4)
+// 				}
+// 			} else {
+// 				client.pendingMsgs.Insert(msg)
+// 			}
+// 		}
+// 	}
+// }
 
 func (s *server) resendUnAckedMessages() {
 	for _, client := range s.clientInfo {
@@ -198,7 +198,7 @@ func (s *server) resendUnAckedMessages() {
 				if err != nil {
 					sLog(s, err.Error(), 2)
 				} else {
-					sLog(s, fmt.Sprintln("[resendUnAckedMessages] Resent message: ", msg.SeqNum), 4)
+					sLog(s, fmt.Sprintln("Resent unAcked message: ", msg.SeqNum, "of", msg.ConnID), 4)
 				}
 				client.hasSentData = true
 				if item.currBackoff == 0 {
