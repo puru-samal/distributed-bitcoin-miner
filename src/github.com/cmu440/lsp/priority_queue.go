@@ -1,6 +1,8 @@
 package lsp
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type priorityQueue struct {
 	q []*Message
@@ -24,14 +26,17 @@ func (pq *priorityQueue) GetMin() (*Message, error) {
 	if len(pq.q) == 0 {
 		return nil, fmt.Errorf("priority queue is empty")
 	}
+
 	return pq.q[0], nil
 }
 
 func (pq *priorityQueue) RemoveMin() (*Message, error) {
 	min, err := pq.GetMin()
+
 	if err != nil {
 		return nil, err
 	}
+
 	pq.q[0] = pq.q[len(pq.q)-1]
 	pq.q = pq.q[:len(pq.q)-1]
 	pq.minHeapifyDown(0)
@@ -40,6 +45,10 @@ func (pq *priorityQueue) RemoveMin() (*Message, error) {
 
 func (pq *priorityQueue) Empty() bool {
 	return len(pq.q) == 0
+}
+
+func (pq *priorityQueue) Size() int {
+	return len(pq.q)
 }
 
 /** internal helpers **/
