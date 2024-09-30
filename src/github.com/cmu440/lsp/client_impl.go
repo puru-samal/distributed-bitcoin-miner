@@ -248,15 +248,26 @@ func (c *client) main() {
 			switch req.mtype {
 			case ID:
 				c.connIDReturnChan <- &internalMsg{mtype: ID, id: c.connID}
+
 			case Write:
+
 				c.writeSeqNum++
 				validateWriteInternal(c, req)
 				if c.state == Closing || c.state == Lost {
 					req.err = errors.New("client closed/lost")
 				}
-				processSendNewData(c, req.msg)
+
+				if c.state == Active {
+					sent := processSendNewData(c, req.msg)
+					if sent {
+						cLog(c, fmt.Sprintf("[Write proc'd] %s\n", req.msg), 1)
+					} else {
+						cLog(c, fmt.Sprintf("[Write pend'n] %s\n", req.msg), 1)
+					}
+					cLog(c, fmt.Sprintf("[Swin state] %s\n", c.unAckedMsgs.String()), 1)
+				}
+
 				c.writeReturnChan <- req
-				cLog(c, fmt.Sprintf("[Write proc'd] %s\n", req.msg), 1)
 
 			case Close:
 				// TODO: Send all msgs in Unacked messages
@@ -279,9 +290,13 @@ func (c *client) main() {
 			c.readSeqNum++
 			c.toBeRead = nil
 			if pqmsg, exist := c.pendingRead.GetMin(); exist == nil && pqmsg.SeqNum == c.readSeqNum {
-				_, err := c.pendingRead.RemoveMin()
-				cLog(c, fmt.Sprintf("read: pq rmMin msg: %s\n", pqmsg), 2)
+				c.pendingRead.RemoveMin()
+				var err error
+				if c.state == Closing || (c.state == Lost && c.pendingRead.Empty()) {
+					err = errors.New("client closed or conn lost")
+				}
 				c.toBeRead = &internalMsg{mtype: Read, msg: pqmsg, err: err}
+				cLog(c, fmt.Sprintf("[toBeRead]: %s\n", pqmsg), 2)
 			}
 
 		case <-c.epFire:

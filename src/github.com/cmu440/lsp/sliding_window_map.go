@@ -59,10 +59,6 @@ func (m *sWindowMap) Remove(sn int) (*Message, bool) {
 	if exist {
 		delete(m.mp, sn)
 		m.ackdSNs = append(m.ackdSNs, sn)
-		//if sn == m.LB {
-		//	m.LB++
-		//	m.UB++
-		//}
 		m.updateBound()
 		return msg, exist
 	}

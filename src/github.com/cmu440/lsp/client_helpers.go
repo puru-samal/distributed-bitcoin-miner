@@ -172,16 +172,24 @@ func processRecvData(c *client, msg *Message) {
 		hasIntegrity := checkIntegrity(msg)
 		if hasIntegrity {
 			if msg.SeqNum == c.readSeqNum {
-				cLog(c, fmt.Sprintf("set [toBeRead]: %s\n", msg), 2)
-				c.toBeRead = &internalMsg{mtype: Read, msg: msg, err: nil}
+				cLog(c, fmt.Sprintf("[toBeRead]: %s\n", msg), 2)
+				var err error
+				if c.state == Closing || (c.state == Lost && c.pendingRead.Empty()) {
+					err = errors.New("client closed or conn lost")
+				}
+				c.toBeRead = &internalMsg{mtype: Read, msg: msg, err: err}
 			} else {
+				cLog(c, fmt.Sprintf("[pendingRead]: %s\n", msg), 2)
 				c.pendingRead.Insert(msg)
 			}
 		}
+	} else {
+		cLog(c, fmt.Sprintf("[DroppedRead:OOB]: %s\n", msg), 2)
 	}
 
 	ackMsg := NewAck(c.connID, msg.SeqNum)
 	processSendAcks(c, ackMsg)
+	cLog(c, fmt.Sprintf("[DataAck]: %s\n", ackMsg), 2)
 	c.resetEpLimit <- 1
 }
 
@@ -202,12 +210,19 @@ func processRecvAcks(c *client, msg *Message) {
 			cLog(c, "[HEARTBEAT: server]", 2)
 		}
 		c.unAckedMsgs.Remove(msg.SeqNum)
-		pqmsg, exist := c.pendingWrite.GetMin()
-		if exist == nil && c.unAckedMsgs.Put(pqmsg.SeqNum, pqmsg) {
+		//pqmsg, exist := c.pendingWrite.GetMin()
+
+		for pqmsg, exist := c.pendingWrite.GetMin(); exist == nil && c.unAckedMsgs.Put(pqmsg.SeqNum, pqmsg); {
 			c.pendingWrite.RemoveMin()
 			cLog(c, fmt.Sprintf("preparing (pending write): %s\n", pqmsg), 2)
 		}
 
+		/*
+			if exist == nil && c.unAckedMsgs.Put(pqmsg.SeqNum, pqmsg) {
+				c.pendingWrite.RemoveMin()
+				cLog(c, fmt.Sprintf("preparing (pending write): %s\n", pqmsg), 2)
+			}
+		*/
 	}
 	cLog(c, "EpochLimit reset", 3)
 	c.resetEpLimit <- 1
