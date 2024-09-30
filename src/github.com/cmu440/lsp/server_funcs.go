@@ -3,10 +3,17 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 
 	"github.com/cmu440/lspnet"
 )
+
+func sLog(s *server, str string, lvl int) {
+	if lvl == s.logLvl {
+		log.Print(str)
+	}
+}
 
 func (s *server) sendMessage(message *Message, addr *lspnet.UDPAddr) error {
 	marshalMessage, err := json.Marshal(message)
@@ -47,16 +54,17 @@ func (s *server) checkConnection(clientMsg *clientMessage, clientAddr *lspnet.UD
 
 	newAck := NewAck(s.nextConnectionID, clientMsg.message.SeqNum)
 	err := s.sendMessage(newAck, clientAddr)
+
 	if err != nil {
-		log.Println(err)
+		sLog(s, err.Error(), 2)
+	} else {
+		sLog(s, fmt.Sprintln("Sent newAck", newAck), 4)
 	}
+
 	LB := clientMsg.message.SeqNum + 1
 	UB := LB + s.params.WindowSize
 	mSz := s.params.MaxUnackedMessages
 	newClient.unAckedMsgs.Reinit(LB, UB, mSz)
-
-	log.Println("[Check Connection] newClient.unAckedMsgs: ", newClient.unAckedMsgs.LB, newClient.unAckedMsgs.UB, newClient.unAckedMsgs.maxSize)
-
 	newClient.writeSeqNum += 1
 	s.nextConnectionID += 1
 
@@ -84,9 +92,10 @@ func (s *server) DataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAdd
 	err := s.sendMessage(ack, clientAddr)
 
 	if err != nil {
-		log.Println("[DataHandler] Error sending ack: ", err)
+		sLog(s, err.Error(), 2)
+	} else {
+		sLog(s, fmt.Sprintln("[DataHandler] Sent SeqNum", ack.SeqNum, "of", connID), 4)
 	}
-
 	client.hasSentData = true
 }
 
@@ -96,11 +105,15 @@ func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) 
 		return acknowledged
 	}
 	client := s.clientInfo[connID]
-	_, exist := client.unAckedMsgs.Remove(clientMsg.message.SeqNum)
-	log.Println("[AckHandler] client.unAckedMsgs: ", client.unAckedMsgs.LB, client.unAckedMsgs.UB, client.unAckedMsgs.maxSize)
-	if !exist {
-		return acknowledged
+	_, success := client.unAckedMsgs.Remove(clientMsg.message.SeqNum)
+
+	if success {
+		sLog(s, fmt.Sprintln("Removed message from unAckedMsgs", clientMsg.message.SeqNum, "of", clientMsg.message.ConnID), 4)
 	}
+	if !success {
+		sLog(s, "[AckHandler] Error removing message from unAckedMsgs", 2)
+	}
+
 	if closing && client.pendingMsgs.Empty() && client.unAckedMsgs.Empty() {
 		delete(s.clientInfo, connID)
 		if len(s.clientInfo) == 0 {
@@ -138,7 +151,6 @@ func (s *server) readRequest() {
 		payload: nil,
 	}
 	s.readResponseChan <- readRes
-	return
 }
 
 func (s *server) writeRequest(writeMsg *clientWriteRequest) {
@@ -155,31 +167,38 @@ func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 	}
 }
 
-func (s *server) defaultActions() {
-	for _, client := range s.clientInfo {
-		if !client.pendingMsgs.Empty() {
-			item, _ := client.pendingMsgs.RemoveMin()
-			if client.isValidMessage(item.SeqNum) || client.unAckedMsgs.Empty() {
-				err := s.sendMessage(item, client.addr)
-				if err != nil {
-					log.Println(err)
-				}
-				client.unAckedMsgs.Put(item.SeqNum, item)
-				//log.Println("[defaultActions] client.unAckedMsgs: ", len(client.unAckedMsgs.mp), client.unAckedMsgs.maxSize)
-			} else {
-				client.pendingMsgs.Insert(item)
-			}
-		}
-	}
-}
+// func (s *server) defaultActions() {
+// 	for _, client := range s.clientInfo {
+// 		if client.pendingMsgs.Size() > 0 {
+// 			msg, _ := client.pendingMsgs.RemoveMin()
+// 			if client.isValidMessage(msg.SeqNum) || client.unAckedMsgs.Empty() {
+// 				err := s.sendMessage(msg, client.addr)
+// 				if err != nil {
+// 					log.Println(err)
+// 				}
+// 				insertFail := client.unAckedMsgs.Put(msg.SeqNum, msg)
+// 				if !insertFail {
+// 					sLog(s, "[defaultActions] Error inserting into unAckedMsgs", 2)
+// 				} else {
+// 					sLog(s, fmt.Sprintln("[defaultActions] Inserted into unAckedMsgs: ", msg.SeqNum), 4)
+// 				}
+// 			} else {
+// 				client.pendingMsgs.Insert(msg)
+// 			}
+// 		}
+// 	}
+// }
 
 func (s *server) resendUnAckedMessages() {
 	for _, client := range s.clientInfo {
 		for _, item := range client.unAckedMsgs.mp {
 			if item.unAckedCounter == item.currBackoff {
-				err := s.sendMessage(item.msg, client.addr)
+				msg, _ := client.unAckedMsgs.Get(item.msg.SeqNum)
+				err := s.sendMessage(msg, client.addr)
 				if err != nil {
-					log.Println(err)
+					sLog(s, err.Error(), 2)
+				} else {
+					sLog(s, fmt.Sprintln("Resent unAcked message: ", msg.SeqNum, "of", msg.ConnID), 4)
 				}
 				client.hasSentData = true
 				if item.currBackoff == 0 {
@@ -207,12 +226,14 @@ func (s *server) sendHeartbeatMessages() {
 		}
 		client.hasReceivedData = false
 	}
+
 	for connID, client := range s.clientInfo {
 		if !client.hasSentData && !client.closed {
 			s.sendMessage(NewAck(connID, 0), client.addr)
 		}
 		client.hasSentData = false
 	}
+
 }
 
 func (s *server) CAckHandler(clientMsg *clientMessage, connID int, closing bool) bool {
