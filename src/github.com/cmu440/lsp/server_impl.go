@@ -127,7 +127,7 @@ func NewServer(port int, params *Params) (Server, error) {
 		shutdownCompleteChan:     make(chan bool),
 		serverLostConnectionChan: make(chan bool),
 
-		logLvl: 0,
+		logLvl: 4,
 	}
 
 	go server.handleIncomingMessages()
@@ -217,6 +217,7 @@ func (s *server) serverMain() {
 				s.closeConnResponseChan <- errors.New("connection not found")
 			} else {
 				// close the connection
+				sLog(s, fmt.Sprintln("[Server closeConnRequestChan] client Close", id), 4)
 				client.closed = true
 				s.closeConnResponseChan <- nil
 			}
@@ -331,7 +332,6 @@ func (s *server) Read() (int, []byte, error) {
 		if s.isClosed {
 			return 0, nil, errors.New("server is closed")
 		}
-
 	}
 }
 
@@ -353,12 +353,9 @@ func (s *server) CloseConn(connId int) error {
 	if s.isClosed {
 		return errors.New("server is closed")
 	}
-	sLog(s, "[Server CloseConn]", 1)
+	sLog(s, fmt.Sprintln("[Server CloseConn]"), 4)
 	s.closeConnRequestChan <- connId
-	if s.closeConnResponseChan != nil {
-		return errors.New("server is closed")
-	}
-	return nil
+	return <-s.closeConnResponseChan
 }
 
 // closes the server by sending serverShutdownChan to the main function
