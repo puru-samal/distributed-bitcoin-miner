@@ -34,9 +34,10 @@ type server struct {
 	removeClientChan      chan int
 
 	// Channels for server close
-	isClosed             bool
-	serverShutdownChan   chan bool
-	shutdownCompleteChan chan bool
+	isClosed                 bool
+	serverShutdownChan       chan bool
+	shutdownCompleteChan     chan bool
+	serverLostConnectionChan chan bool
 
 	// Logging level
 	logLvl int
@@ -121,16 +122,19 @@ func NewServer(port int, params *Params) (Server, error) {
 		closeConnResponseChan: make(chan error),
 		removeClientChan:      make(chan int),
 
-		isClosed:             false,
-		serverShutdownChan:   make(chan bool),
-		shutdownCompleteChan: make(chan bool),
+		isClosed:                 false,
+		serverShutdownChan:       make(chan bool),
+		shutdownCompleteChan:     make(chan bool),
+		serverLostConnectionChan: make(chan bool),
 
-		logLvl: 0,
+		logLvl: 4,
 	}
 
 	go server.handleIncomingMessages()
 
 	go server.serverMain()
+
+	go server.serverLostConnection()
 
 	return server, nil
 }
@@ -211,6 +215,7 @@ func (s *server) serverMain() {
 			if !ok || client.closed {
 				s.closeConnResponseChan <- errors.New("connection not found")
 			} else {
+				// close the connection
 				client.closed = true
 				s.closeConnResponseChan <- nil
 			}
@@ -236,24 +241,6 @@ func (s *server) serverMain() {
 		default:
 			sLog(s, "[Server default]", 1)
 			for _, client := range s.clientInfo {
-				// if client.pendingMsgs.Size() > 0 {
-				// 	msg, _ := client.pendingMsgs.RemoveMin()
-				// 	if client.isValidMessage(msg.SeqNum) || client.unAckedMsgs.Empty() {
-				// 		err := s.sendMessage(msg, client.addr)
-				// 		if err != nil {
-				// 			log.Println(err)
-				// 		}
-				// 		insertFail := client.unAckedMsgs.Put(msg.SeqNum, msg)
-				// 		if !insertFail {
-				// 			sLog(s, "[defaultActions] Error inserting into unAckedMsgs", 2)
-				// 		} else {
-				// 			sLog(s, fmt.Sprintln("[defaultActions] Inserted into unAckedMsgs: ", msg.SeqNum, "of", msg.ConnID), 4)
-				// 		}
-				// 	} else {
-				// 		client.pendingMsgs.Insert(msg)
-				// 	}
-				// }
-
 				size := client.pendingMsgs.Size()
 				for size > 0 {
 					msg, _ := client.pendingMsgs.RemoveMin()
@@ -309,6 +296,15 @@ func (s *server) handleIncomingMessages() {
 	}
 }
 
+func (s *server) serverLostConnection() {
+	for {
+		select {
+		case <-s.serverLostConnectionChan:
+			return
+		}
+	}
+}
+
 // sends readRequestChan to the main function to read a message from a client (readRequest function)
 // if the return value of readResponseChan from readRequest is
 // (1) !ok: connID does not exist, it returns an error
@@ -320,21 +316,21 @@ func (s *server) Read() (int, []byte, error) {
 	sLog(s, "[Server Read]", 1)
 	for {
 		s.readRequestChan <- true
-		readRes, ok := <-s.readResponseChan
-		if !ok {
-			return readRes.connID, nil, errors.New("client connection does not exist")
-		}
+		readRes := <-s.readResponseChan
 
 		if readRes.payload != nil {
 			return readRes.connID, readRes.payload, nil
 		} else if readRes.connID != -1 {
 			s.removeClientChan <- readRes.connID
 			return readRes.connID, nil, errors.New("need to delete client")
+		} else if readRes.connID == -1 {
+			return 0, nil, errors.New("client does not exist")
 		}
 
 		if s.isClosed {
 			return 0, nil, errors.New("server is closed")
 		}
+
 	}
 }
 
@@ -353,9 +349,15 @@ func (s *server) Write(connId int, payload []byte) error {
 
 // closes a connection with a client by sending closeConnRequestChan to the main function
 func (s *server) CloseConn(connId int) error {
-	sLog(s, "[Server CloseConn]", 4)
+	if s.isClosed {
+		return errors.New("server is closed")
+	}
+	sLog(s, "[Server CloseConn]", 1)
 	s.closeConnRequestChan <- connId
-	return <-s.closeConnResponseChan
+	if s.closeConnResponseChan != nil {
+		return errors.New("server is closed")
+	}
+	return nil
 }
 
 // closes the server by sending serverShutdownChan to the main function
@@ -366,5 +368,6 @@ func (s *server) Close() error {
 	s.isClosed = true
 	<-s.shutdownCompleteChan
 	s.serverShutdownChan <- true
+	s.serverLostConnectionChan <- true
 	return nil
 }

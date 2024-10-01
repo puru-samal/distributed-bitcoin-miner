@@ -146,6 +146,7 @@ func (s *server) readRequest() {
 	for id, client := range s.clientInfo {
 		res, ok := client.pendingPayload[client.readSeqNum]
 
+		// if the client is closed and there are no pending messages
 		if client.closed && len(client.pendingPayload) == 0 {
 			readRes := &readResponse{
 				connID:  id,
@@ -194,28 +195,6 @@ func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 	}
 }
 
-// func (s *server) defaultActions() {
-// 	for _, client := range s.clientInfo {
-// 		if client.pendingMsgs.Size() > 0 {
-// 			msg, _ := client.pendingMsgs.RemoveMin()
-// 			if client.isValidMessage(msg.SeqNum) || client.unAckedMsgs.Empty() {
-// 				err := s.sendMessage(msg, client.addr)
-// 				if err != nil {
-// 					log.Println(err)
-// 				}
-// 				insertFail := client.unAckedMsgs.Put(msg.SeqNum, msg)
-// 				if !insertFail {
-// 					sLog(s, "[defaultActions] Error inserting into unAckedMsgs", 2)
-// 				} else {
-// 					sLog(s, fmt.Sprintln("[defaultActions] Inserted into unAckedMsgs: ", msg.SeqNum), 4)
-// 				}
-// 			} else {
-// 				client.pendingMsgs.Insert(msg)
-// 			}
-// 		}
-// 	}
-// }
-
 // resend unacknowledged/dropped messages
 // currBackoff: number of epochs we wait before resending the data (that did not receive ACK)
 // maxBackOffInterval: maximum amount of epochs we wait w/o retrying to transmit the data
@@ -248,7 +227,7 @@ func (s *server) resendUnAckedMessages() {
 // send a heartbeat message to the client
 func (s *server) sendHeartbeatMessages() {
 	for _, client := range s.clientInfo {
-
+		// Close client due to EpochLimit
 		if !client.hasReceivedData && !client.closed {
 			client.unReceivedNum += 1
 			if client.unReceivedNum >= s.params.EpochLimit {
