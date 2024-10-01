@@ -9,12 +9,14 @@ import (
 	"github.com/cmu440/lspnet"
 )
 
+// logging function based on log level
 func sLog(s *server, str string, lvl int) {
 	if lvl == s.logLvl {
 		log.Print(str)
 	}
 }
 
+// marshal and send message to client
 func (s *server) sendMessage(message *Message, addr *lspnet.UDPAddr) error {
 	marshalMessage, err := json.Marshal(message)
 	if err != nil {
@@ -24,6 +26,8 @@ func (s *server) sendMessage(message *Message, addr *lspnet.UDPAddr) error {
 	return err
 }
 
+// check if the connection is already established
+// if not, establish a new connection by initializing the clientInfo and sending a newAck
 func (s *server) checkConnection(clientMsg *clientMessage, clientAddr *lspnet.UDPAddr) bool {
 	alreadyConnected := false
 
@@ -71,8 +75,13 @@ func (s *server) checkConnection(clientMsg *clientMessage, clientAddr *lspnet.UD
 	return false
 }
 
+// Data handler
+// check if the message is corrupted or not
+// if not truncate the payload to message size and save it into the pendingPayload of the client for future read requests
+// also send NewAck for the received message
 func (s *server) DataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAddr, connID int) {
 	payload := clientMsg.message.Payload
+	// check if the messages is corrupted
 	checkSum := CalculateChecksum(connID, clientMsg.message.SeqNum, len(payload), payload)
 	if clientMsg.message.Size > len(payload) || (clientMsg.message.Size == len(payload) && checkSum != clientMsg.message.Checksum) {
 		client, ok := s.clientInfo[connID]
@@ -99,8 +108,14 @@ func (s *server) DataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAdd
 	client.hasSentData = true
 }
 
+// Acknowledgement handler
+// remove the message from the unAckedMsgs of the client
+// if the server is closing and there are no pending messages and unAcked messages, delete the client
+// if there are no clients left, send a signal to the shutdownCompleteChan
 func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) bool {
 	acknowledged := false
+
+	// if it is a heartbeat message
 	if clientMsg.message.SeqNum == 0 {
 		return acknowledged
 	}
@@ -124,6 +139,7 @@ func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) 
 	return acknowledged
 }
 
+// read request handler
 func (s *server) readRequest() {
 	for id, client := range s.clientInfo {
 		res, ok := client.pendingPayload[client.readSeqNum]
@@ -153,6 +169,8 @@ func (s *server) readRequest() {
 	s.readResponseChan <- readRes
 }
 
+// write request handler
+// write request is added to the pendingMsgs of the client
 func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 	client, ok := s.clientInfo[writeMsg.connID]
 	if !ok || client.closed {
@@ -189,20 +207,25 @@ func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 // 	}
 // }
 
+// resend unacknowledged/dropped messages
+// currBackoff: number of epochs we wait before resending the data (that did not receive ACK)
+// maxBackOffInterval: maximum amount of epochs we wait w/o retrying to transmit the data
 func (s *server) resendUnAckedMessages() {
 	for _, client := range s.clientInfo {
 		for _, item := range client.unAckedMsgs.mp {
 			if item.unAckedCounter == item.currBackoff {
 				msg, _ := client.unAckedMsgs.Get(item.msg.SeqNum)
 				err := s.sendMessage(msg, client.addr)
+
 				if err != nil {
 					sLog(s, err.Error(), 2)
 				} else {
 					sLog(s, fmt.Sprintln("Resent unAcked message: ", msg.SeqNum, "of", msg.ConnID), 4)
 				}
 				client.hasSentData = true
+				// update backoff
 				if item.currBackoff == 0 {
-					item.currBackoff = 1
+					item.currBackoff += 1
 				} else {
 					item.currBackoff = item.currBackoff * 2
 				}
@@ -216,8 +239,14 @@ func (s *server) resendUnAckedMessages() {
 	}
 }
 
+// detect when the client has lost connection (timeout)
+// (1) if the client is connected and the number of epochs that the client hasn't sent
+// any data exceeds the EpochLimit, close the connection
+// (2) if the client is connected and the server has not sent any data message to it in the last epoch
+// send a heartbeat message to the client
 func (s *server) sendHeartbeatMessages() {
 	for _, client := range s.clientInfo {
+
 		if !client.hasReceivedData && !client.closed {
 			client.unReceivedNum += 1
 			if client.unReceivedNum >= s.params.EpochLimit {
