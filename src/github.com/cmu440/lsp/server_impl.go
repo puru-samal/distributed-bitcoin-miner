@@ -127,7 +127,7 @@ func NewServer(port int, params *Params) (Server, error) {
 		shutdownCompleteChan:     make(chan bool),
 		serverLostConnectionChan: make(chan bool),
 
-		logLvl: 4,
+		logLvl: 0,
 	}
 
 	go server.handleIncomingMessages()
@@ -203,7 +203,7 @@ func (s *server) serverMain() {
 
 		// If the client has no payload to read, it will remove the client
 		case id := <-s.removeClientChan:
-			sLog(s, "[Server removeClientChan]", 1)
+			sLog(s, "[Server removeClientChan]", 4)
 			delete(s.clientInfo, id)
 
 		// close connection of the id received from CloseConn()
@@ -213,6 +213,7 @@ func (s *server) serverMain() {
 			sLog(s, "[Server closeConnRequestChan]", 1)
 			client, ok := s.clientInfo[id]
 			if !ok || client.closed {
+				sLog(s, "[Server closeConnRequestChan] connection not found", 4)
 				s.closeConnResponseChan <- errors.New("connection not found")
 			} else {
 				// close the connection
@@ -365,9 +366,9 @@ func (s *server) CloseConn(connId int) error {
 func (s *server) Close() error {
 	sLog(s, "[Server Close]", 4)
 	defer s.conn.Close()
-	s.isClosed = true
-	<-s.shutdownCompleteChan
 	s.serverShutdownChan <- true
+	<-s.shutdownCompleteChan
+	s.isClosed = true
 	s.serverLostConnectionChan <- true
 	return nil
 }

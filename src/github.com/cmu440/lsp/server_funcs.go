@@ -261,6 +261,8 @@ func (s *server) CAckHandler(clientMsg *clientMessage, connID int, closing bool)
 	}
 	if closing && client.pendingMsgs.Empty() && client.unAckedMsgs.Empty() {
 		delete(s.clientInfo, connID)
+		sLog(s, fmt.Sprintf("[Close Check] unack: %s\n", client.unAckedMsgs.String()), 4)
+		sLog(s, fmt.Sprintf("[Close Check] pendM: %v\n", client.pendingMsgs.q), 4)
 		if len(s.clientInfo) == 0 {
 			s.shutdownCompleteChan <- true
 			cacknowledged = true
