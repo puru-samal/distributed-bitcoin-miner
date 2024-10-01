@@ -109,7 +109,7 @@ func (m *sWindowMap) UpdateBackoffs(maxBackoff int) (*priorityQueue, bool) {
 	for _, v := range m.mp {
 		// update counter,
 		// if equal to next backoff, mark for resend, update backoffs
-		if v.unAckedCounter == v.currBackoff {
+		if v.unAckedCounter >= v.currBackoff {
 			pq.Insert(v.msg)
 			if v.currBackoff == 0 {
 				v.currBackoff++

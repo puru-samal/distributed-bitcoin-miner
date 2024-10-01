@@ -57,6 +57,7 @@ type client struct {
 	processInternal     chan *internalMsg
 
 	// TODO: timing
+	epochTimer   *time.Ticker
 	epFire       chan int
 	epLimFire    chan int
 	resetEpLimit chan int
@@ -125,6 +126,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		closeReturnChan:     make(chan *internalMsg),
 		processInternal:     make(chan *internalMsg),
 
+		epochTimer:   time.NewTicker(time.Duration(params.EpochMillis * int(time.Millisecond))),
 		epFire:       make(chan int),
 		epLimFire:    make(chan int),
 		resetEpLimit: make(chan int),
@@ -224,10 +226,10 @@ func (c *client) main() {
 			cLog(c, "[newMsgSendChan]", 1)
 			switch msg.Type {
 			case MsgConnect:
-				cLog(c, " :Connect", 1)
+				cLog(c, "[Connect]", 1)
 				processSendConnect(c, msg)
 			case MsgData:
-				cLog(c, fmt.Sprintf("[Data]: %s\n", msg), 1)
+				cLog(c, fmt.Sprintf("[Data]: %d\n", msg.SeqNum), 1)
 				processSendNewData(c, msg)
 			}
 
@@ -236,10 +238,10 @@ func (c *client) main() {
 			cLog(c, "[msgRecvChan]", 1)
 			switch msg.Type {
 			case MsgData:
-				cLog(c, fmt.Sprintf("[Data]: %s\n", msg), 1)
+				cLog(c, fmt.Sprintf("[Data]: %d\n", msg.SeqNum), 1)
 				processRecvData(c, msg)
 			case MsgAck, MsgCAck:
-				cLog(c, fmt.Sprintf("[Ack]: %s\n", msg), 1)
+				cLog(c, fmt.Sprintf("[Ack]: %d\n", msg.SeqNum), 1)
 				processRecvAcks(c, msg)
 			}
 
@@ -260,11 +262,11 @@ func (c *client) main() {
 				if c.state == Active {
 					sent := processSendNewData(c, req.msg)
 					if sent {
-						cLog(c, fmt.Sprintf("[Write proc'd] %s\n", req.msg), 1)
+						cLog(c, fmt.Sprintf("[Write proc'd] %d\n", req.msg.SeqNum), 2)
 					} else {
-						cLog(c, fmt.Sprintf("[Write pend'n] %s\n", req.msg), 1)
+						cLog(c, fmt.Sprintf("[Write pend'n] %d\n", req.msg.SeqNum), 2)
 					}
-					cLog(c, fmt.Sprintf("[Swin state] %s\n", c.unAckedMsgs.String()), 1)
+					cLog(c, fmt.Sprintf("[Swin state] %s\n", c.unAckedMsgs.String()), 3)
 				}
 
 				c.writeReturnChan <- req
@@ -285,10 +287,15 @@ func (c *client) main() {
 				}
 			}
 		case readActiveChan <- c.toBeRead:
+			cLog(c, fmt.Sprintf("[!Read] %d\n", c.toBeRead.msg.SeqNum), 1)
 
-			cLog(c, fmt.Sprintf("[!Read] %s\n", c.toBeRead.msg), 1)
-			c.readSeqNum++
+			if pqmsg, exist := c.pendingRead.GetMin(); exist == nil && c.toBeRead.msg.SeqNum == pqmsg.SeqNum {
+				c.pendingRead.RemoveMin()
+			}
+
 			c.toBeRead = nil
+			c.readSeqNum++
+
 			if pqmsg, exist := c.pendingRead.GetMin(); exist == nil && pqmsg.SeqNum == c.readSeqNum {
 				c.pendingRead.RemoveMin()
 				var err error
@@ -296,16 +303,18 @@ func (c *client) main() {
 					err = errors.New("client closed or conn lost")
 				}
 				c.toBeRead = &internalMsg{mtype: Read, msg: pqmsg, err: err}
-				cLog(c, fmt.Sprintf("[toBeRead]: %s\n", pqmsg), 2)
+				cLog(c, fmt.Sprintf("[toBeRead]: %d\n", pqmsg.SeqNum), 2)
 			}
 
-		case <-c.epFire:
-
+		case <-c.epochTimer.C:
 			cLog(c, "[epFire]", 2)
 			if c.state == Connect {
 				processReSendConnect(c)
 			} else {
-				processReSendDataOrHeartbeat(c)
+				isheartbeat := processReSendDataOrHeartbeat(c)
+				if !isheartbeat {
+					c.resetEpLimit <- 1
+				}
 			}
 
 		case <-c.epLimFire:
@@ -339,19 +348,13 @@ func (c *client) reader() {
 }
 
 func (c *client) timer() {
-	epochTimer := time.NewTimer(time.Duration(c.params.EpochMillis) * time.Millisecond)
+	//epochTimer := time.NewTicker(time.Duration(c.params.EpochMillis * int(time.Millisecond)))
 	epochLimitTimer := time.NewTimer(time.Duration(c.params.EpochMillis*c.params.EpochLimit) * time.Millisecond)
 	for {
 		select {
 		case <-c.returnTimer:
 			cLog(c, "returning: timer", 1)
 			return
-		case <-epochTimer.C: // Epoch tick
-			c.epFire <- 1
-			epochTimer.Reset(time.Duration(c.params.EpochMillis) * time.Millisecond)
-
-		case <-epochLimitTimer.C: // Epoch Limit tick
-			c.epLimFire <- 1
 
 		case <-c.resetEpLimit:
 			epochLimitTimer.Reset(time.Duration(c.params.EpochMillis*c.params.EpochLimit) * time.Millisecond)

@@ -94,7 +94,7 @@ func (s *server) DataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAdd
 	if err != nil {
 		sLog(s, err.Error(), 2)
 	} else {
-		sLog(s, fmt.Sprintln("[DataHandler] Sent SeqNum", ack.SeqNum, "of", connID), 4)
+		sLog(s, fmt.Sprintln("[DataHandler] Sent Ack SeqNum", ack.SeqNum, "of", connID), 4)
 	}
 	client.hasSentData = true
 }
@@ -160,7 +160,14 @@ func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 	} else {
 		checkSum := CalculateChecksum(writeMsg.connID, client.writeSeqNum, len(writeMsg.payload), writeMsg.payload)
 		newDataMessage := NewData(writeMsg.connID, client.writeSeqNum, len(writeMsg.payload), writeMsg.payload, checkSum)
-		client.pendingMsgs.Insert(newDataMessage)
+
+		isValid := client.unAckedMsgs.Put(newDataMessage.SeqNum, newDataMessage)
+		if isValid {
+			s.sendMessage(newDataMessage, client.addr)
+			sLog(s, fmt.Sprintln("Sent new message: ", newDataMessage.SeqNum, "of", newDataMessage.ConnID), 4)
+		} else {
+			client.pendingMsgs.Insert(newDataMessage)
+		}
 
 		client.writeSeqNum += 1
 		s.writeResponseChan <- nil
@@ -191,27 +198,21 @@ func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 
 func (s *server) resendUnAckedMessages() {
 	for _, client := range s.clientInfo {
-		for _, item := range client.unAckedMsgs.mp {
-			if item.unAckedCounter == item.currBackoff {
-				msg, _ := client.unAckedMsgs.Get(item.msg.SeqNum)
+
+		retryMsgs, exist := client.unAckedMsgs.UpdateBackoffs(s.params.MaxBackOffInterval)
+		if exist {
+			for !retryMsgs.Empty() {
+				msg, _ := retryMsgs.RemoveMin()
 				err := s.sendMessage(msg, client.addr)
 				if err != nil {
 					sLog(s, err.Error(), 2)
 				} else {
 					sLog(s, fmt.Sprintln("Resent unAcked message: ", msg.SeqNum, "of", msg.ConnID), 4)
 				}
-				client.hasSentData = true
-				if item.currBackoff == 0 {
-					item.currBackoff = 1
-				} else {
-					item.currBackoff = item.currBackoff * 2
-				}
-				item.unAckedCounter = 0
-				item.currBackoff = min(item.currBackoff, s.params.MaxBackOffInterval)
-			} else {
-				item.unAckedCounter += 1
 			}
 		}
+
+		client.hasSentData = exist
 
 	}
 }

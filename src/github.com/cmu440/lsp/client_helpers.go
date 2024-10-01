@@ -57,7 +57,7 @@ func initClientAfterConnect(c *client, msg *Message) {
 	c.state = Active
 	LB := c.writeSeqNum + 1
 	UB := LB + c.params.WindowSize
-	mSz := min(c.params.MaxUnackedMessages, c.params.WindowSize)
+	mSz := c.params.MaxUnackedMessages
 	c.unAckedMsgs.Reinit(LB, UB, mSz)
 	c.returnNewClient <- 1
 }
@@ -123,24 +123,23 @@ func processReSendConnect(c *client) bool {
 // Update backoffs and get a priority queue of messages to be send
 // if priority queue is empty, send heartbeat instead
 func processReSendDataOrHeartbeat(c *client) bool {
-	sent := false
+	isheartbeat := false
 	if !(c.state == Active || c.state == Closing) {
-		return sent
+		return isheartbeat
 	}
 	retryMsgs, exist := c.unAckedMsgs.UpdateBackoffs(c.params.MaxBackOffInterval)
 	if exist {
-		cLog(c, fmt.Sprintf("unacked pq: %v\n", retryMsgs.q), 2)
+		cLog(c, fmt.Sprintf("unacked pq: %v\n", retryMsgs.q), 3)
 		for !retryMsgs.Empty() {
 			msg, _ := retryMsgs.RemoveMin()
-			sent = sendToServer(c.clientConn, msg)
-			cLog(c, "retry processing..", 2)
+			sendToServer(c.clientConn, msg)
+			cLog(c, fmt.Sprintf("[resent] %d\n", msg.SeqNum), 2)
 		}
-		cLog(c, "retry processed", 2)
 	} else {
 		heartbeat := NewAck(c.connID, 0)
-		sent = processSendAcks(c, heartbeat)
+		isheartbeat = processSendAcks(c, heartbeat)
 	}
-	return sent
+	return isheartbeat
 }
 
 // Just sent an ack to server
@@ -172,25 +171,27 @@ func processRecvData(c *client, msg *Message) {
 		hasIntegrity := checkIntegrity(msg)
 		if hasIntegrity {
 			if msg.SeqNum == c.readSeqNum {
-				cLog(c, fmt.Sprintf("[toBeRead]: %s\n", msg), 2)
+				cLog(c, fmt.Sprintf("[toBeRead]: %d\n", msg.SeqNum), 2)
 				var err error
 				if c.state == Closing || (c.state == Lost && c.pendingRead.Empty()) {
 					err = errors.New("client closed or conn lost")
 				}
 				c.toBeRead = &internalMsg{mtype: Read, msg: msg, err: err}
 			} else {
-				cLog(c, fmt.Sprintf("[pendingRead]: %s\n", msg), 2)
-				c.pendingRead.Insert(msg)
+				if msg.SeqNum > c.readSeqNum {
+					cLog(c, fmt.Sprintf("[pendingRead]: %d\n", msg.SeqNum), 2)
+					c.pendingRead.Insert(msg)
+				}
+
 			}
 		}
 	} else {
-		cLog(c, fmt.Sprintf("[DroppedRead:OOB]: %s\n", msg), 2)
+		cLog(c, fmt.Sprintf("[DroppedRead:OOB]: %d\n", msg.SeqNum), 2)
 	}
 
 	ackMsg := NewAck(c.connID, msg.SeqNum)
 	processSendAcks(c, ackMsg)
-	cLog(c, fmt.Sprintf("[DataAck]: %s\n", ackMsg), 2)
-	c.resetEpLimit <- 1
+	cLog(c, fmt.Sprintf("[DataAck]: %d\n", ackMsg.SeqNum), 2)
 }
 
 // Connect : If valid ack for connect, init sliding window, signal NewClient to return
@@ -209,21 +210,22 @@ func processRecvAcks(c *client, msg *Message) {
 		if msg.SeqNum == 0 {
 			cLog(c, "[HEARTBEAT: server]", 2)
 		}
-		c.unAckedMsgs.Remove(msg.SeqNum)
-		//pqmsg, exist := c.pendingWrite.GetMin()
-
-		for pqmsg, exist := c.pendingWrite.GetMin(); exist == nil && c.unAckedMsgs.Put(pqmsg.SeqNum, pqmsg); {
-			c.pendingWrite.RemoveMin()
-			cLog(c, fmt.Sprintf("preparing (pending write): %s\n", pqmsg), 2)
-		}
-
-		/*
-			if exist == nil && c.unAckedMsgs.Put(pqmsg.SeqNum, pqmsg) {
+		_, success := c.unAckedMsgs.Remove(msg.SeqNum)
+		if success {
+			for {
+				pqmsg, exist := c.pendingWrite.GetMin()
+				if exist != nil {
+					break
+				}
+				isValid := c.unAckedMsgs.Put(pqmsg.SeqNum, pqmsg)
+				if !isValid {
+					break
+				}
+				sendToServer(c.clientConn, pqmsg)
 				c.pendingWrite.RemoveMin()
-				cLog(c, fmt.Sprintf("preparing (pending write): %s\n", pqmsg), 2)
+				cLog(c, fmt.Sprintf("[pendingWrite]: %d\n", pqmsg.SeqNum), 2)
 			}
-		*/
+		}
 	}
 	cLog(c, "EpochLimit reset", 3)
-	c.resetEpLimit <- 1
 }

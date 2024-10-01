@@ -115,7 +115,7 @@ func NewServer(port int, params *Params) (Server, error) {
 		serverShutdownChan:   make(chan bool),
 		shutdownCompleteChan: make(chan bool),
 
-		logLvl: 4,
+		logLvl: 0,
 	}
 
 	go server.handleIncomingMessages()
@@ -131,7 +131,7 @@ func (s *server) serverMain() {
 	for {
 		select {
 		case <-s.ticker.C:
-			sLog(s, "[Server ticker.C]", 1)
+			sLog(s, "[servEpochFire]", 4)
 			// Acknowledgement to clients that have not received any messages during the last epoch
 			s.sendHeartbeatMessages()
 			s.resendUnAckedMessages()
@@ -143,23 +143,23 @@ func (s *server) serverMain() {
 			connId := clientMsg.message.ConnID
 			switch messageType {
 			case MsgConnect:
-				sLog(s, "[Server incomingMsgChan MsgConnect]", 1)
+				sLog(s, fmt.Sprintf("[Connect:recv]: %d\n", clientMsg.message.SeqNum), 4)
 				alreadyConnected := s.checkConnection(clientMsg, clientAddr)
 				if alreadyConnected {
 					continue
 				}
 			case MsgData:
-				sLog(s, "[Server incomingMsgChan MsgData]", 1)
+				sLog(s, fmt.Sprintf("[Data:recv]: %d\n", clientMsg.message.SeqNum), 4)
 				s.DataHandler(clientMsg, clientAddr, connId)
 
 			case MsgAck:
-				sLog(s, "[Server incomingMsgChan MsgAck]", 1)
+				sLog(s, fmt.Sprintf("[Ack:recv]: %d\n", clientMsg.message.SeqNum), 4)
 				acknowledged := s.AckHandler(clientMsg, connId, shuttingDown)
 				if acknowledged {
 					return
 				}
 			case MsgCAck:
-				sLog(s, "[Server incomingMsgChan MsgCAck]", 1)
+				sLog(s, fmt.Sprintf("[CAck:recv]: %d\n", clientMsg.message.SeqNum), 4)
 				cacknowledged := s.CAckHandler(clientMsg, connId, shuttingDown)
 				if cacknowledged {
 					return
