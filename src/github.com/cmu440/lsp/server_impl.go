@@ -14,12 +14,13 @@ import (
 )
 
 type server struct {
-	params           *Params
-	conn             *lspnet.UDPConn
-	clientInfo       map[int]*clientInfo
-	nextConnectionID int
+	// Server information
+	params           *Params             // configuration parameters for a LSP server
+	conn             *lspnet.UDPConn     // UDP connection for the server
+	clientInfo       map[int]*clientInfo // map of connection IDs to client information
+	nextConnectionID int                 // next connection ID to assign to a new client
 
-	// Channels to read and write messages to/from clients
+	// Channels to handle different functions
 	ticker            *time.Ticker
 	incomingMsgChan   chan *clientMessage
 	readRequestChan   chan bool
@@ -37,44 +38,48 @@ type server struct {
 	serverShutdownChan   chan bool
 	shutdownCompleteChan chan bool
 
+	// Logging level
 	logLvl int
 }
 
-// clientMessage contains a message and the address of the client that sent it
+// message and the address of the client that sent it
 type clientMessage struct {
 	message *Message
 	addr    *lspnet.UDPAddr
 }
 
-// clientWriteRequest contains the connection ID and payload to be sent to a client
+// connection ID and payload to be sent to a client
 type clientWriteRequest struct {
 	connID  int
 	payload []byte
 }
 
-// readResponse contains the connection ID and payload to be read by the client
+// connection ID and payload to be read by the client
 type readResponse struct {
 	connID  int
 	payload []byte
 }
 
-// clientInfo contains information about a client
+// information about a client
 type clientInfo struct {
-	addr           *lspnet.UDPAddr
-	pendingPayload map[int][]byte
+	// Client information
+	addr           *lspnet.UDPAddr // address of the client
+	pendingPayload map[int][]byte  // map of sequence numbers to payloads
 
 	// Sequence numbers for reading and writing
 	readSeqNum  int
 	writeSeqNum int
 
+	// Queues of unAcked messages and pending messages
 	unAckedMsgs *sWindowMap
 	pendingMsgs *priorityQueue
 
-	// variables to keep track of whether the client has received or sent data
+	// Status of the Client (has received data, has sent data, closed)
 	hasReceivedData bool
 	hasSentData     bool
 	closed          bool
 
+	// Number of epochs since the client has received a message
 	unReceivedNum int
 }
 
@@ -85,15 +90,20 @@ type clientInfo struct {
 // project 0, etc.) and immediately return. It should return a non-nil error if
 // there was an error resolving or listening on the specified port number.
 func NewServer(port int, params *Params) (Server, error) {
+	// Start listening on the specified port
+	// return err if there was an error resolving on the specified port number
 	laddr, err := lspnet.ResolveUDPAddr("udp", ":"+fmt.Sprint(port))
 	if err != nil {
 		return nil, err
 	}
+	// Create a UDP connection
+	// return err if there was an error listening on the specified port number
 	connection, err := lspnet.ListenUDP("udp", laddr)
 	if err != nil {
 		return nil, err
 	}
 
+	// Create and initialize the server
 	server := &server{
 		params:           params,
 		conn:             connection,
@@ -128,8 +138,10 @@ func NewServer(port int, params *Params) (Server, error) {
 // serverMain is the main function for the server. It handles all incoming messages
 func (s *server) serverMain() {
 	shuttingDown := false
+
 	for {
 		select {
+		// timer for sending heartbeat messages and resending unacknowledged messages
 		case <-s.ticker.C:
 			sLog(s, "[servEpochFire]", 4)
 			// Acknowledgement to clients that have not received any messages during the last epoch
@@ -141,23 +153,27 @@ func (s *server) serverMain() {
 			messageType := clientMsg.message.Type
 			clientAddr := clientMsg.addr
 			connId := clientMsg.message.ConnID
+			// Handle the message based on its type
 			switch messageType {
+			// Connect
 			case MsgConnect:
 				sLog(s, fmt.Sprintf("[Connect:recv]: %d\n", clientMsg.message.SeqNum), 4)
 				alreadyConnected := s.checkConnection(clientMsg, clientAddr)
 				if alreadyConnected {
 					continue
 				}
+			// Data
 			case MsgData:
 				sLog(s, fmt.Sprintf("[Data:recv]: %d\n", clientMsg.message.SeqNum), 4)
 				s.DataHandler(clientMsg, clientAddr, connId)
-
+			// Acknowledgement
 			case MsgAck:
 				sLog(s, fmt.Sprintf("[Ack:recv]: %d\n", clientMsg.message.SeqNum), 4)
 				acknowledged := s.AckHandler(clientMsg, connId, shuttingDown)
 				if acknowledged {
 					return
 				}
+			// Cumulative Acknowledgement
 			case MsgCAck:
 				sLog(s, fmt.Sprintf("[CAck:recv]: %d\n", clientMsg.message.SeqNum), 4)
 				cacknowledged := s.CAckHandler(clientMsg, connId, shuttingDown)
@@ -170,18 +186,25 @@ func (s *server) serverMain() {
 				client.unReceivedNum = 0
 			}
 
+		// Read a message from a client
 		case <-s.readRequestChan:
 			sLog(s, "[Server readRequestChan]", 1)
 			s.readRequest()
 
+		// Write a message to a client
+		// writeResponseChan is from Write()
 		case writeMsg := <-s.writeRequestChan:
 			sLog(s, "[Server writeRequestChan]", 1)
 			s.writeRequest(writeMsg)
 
+		// If the client has no payload to read, it will remove the client
 		case id := <-s.removeClientChan:
 			sLog(s, "[Server removeClientChan]", 1)
 			delete(s.clientInfo, id)
 
+		// close connection of the id received from CloseConn()
+		// if the connection does not exist, it returns an error
+		// else it closes the connection
 		case id := <-s.closeConnRequestChan:
 			sLog(s, "[Server closeConnRequestChan]", 1)
 			client, ok := s.clientInfo[id]
@@ -192,6 +215,8 @@ func (s *server) serverMain() {
 				s.closeConnResponseChan <- nil
 			}
 
+		// Close() has been called on the server
+		// block until all pending messages to each client have been sent and acknowledged
 		case <-s.serverShutdownChan:
 			sLog(s, "[Server serverShutdownChan]", 1)
 			shuttingDown = true
@@ -200,6 +225,7 @@ func (s *server) serverMain() {
 					delete(s.clientInfo, connId)
 				}
 			}
+			// if there are no clients left, close the server
 			if len(s.clientInfo) == 0 {
 				s.shutdownCompleteChan <- true
 				return
@@ -208,7 +234,26 @@ func (s *server) serverMain() {
 		default:
 			sLog(s, "[Server default]", 1)
 			for _, client := range s.clientInfo {
-				if client.pendingMsgs.Size() > 0 {
+				// if client.pendingMsgs.Size() > 0 {
+				// 	msg, _ := client.pendingMsgs.RemoveMin()
+				// 	if client.isValidMessage(msg.SeqNum) || client.unAckedMsgs.Empty() {
+				// 		err := s.sendMessage(msg, client.addr)
+				// 		if err != nil {
+				// 			log.Println(err)
+				// 		}
+				// 		insertFail := client.unAckedMsgs.Put(msg.SeqNum, msg)
+				// 		if !insertFail {
+				// 			sLog(s, "[defaultActions] Error inserting into unAckedMsgs", 2)
+				// 		} else {
+				// 			sLog(s, fmt.Sprintln("[defaultActions] Inserted into unAckedMsgs: ", msg.SeqNum, "of", msg.ConnID), 4)
+				// 		}
+				// 	} else {
+				// 		client.pendingMsgs.Insert(msg)
+				// 	}
+				// }
+
+				size := client.pendingMsgs.Size()
+				for size > 0 {
 					msg, _ := client.pendingMsgs.RemoveMin()
 					if client.isValidMessage(msg.SeqNum) || client.unAckedMsgs.Empty() {
 						err := s.sendMessage(msg, client.addr)
@@ -220,9 +265,11 @@ func (s *server) serverMain() {
 							sLog(s, "[defaultActions] Error inserting into unAckedMsgs", 2)
 						} else {
 							sLog(s, fmt.Sprintln("[defaultActions] Inserted into unAckedMsgs: ", msg.SeqNum, "of", msg.ConnID), 4)
+							size--
 						}
 					} else {
 						client.pendingMsgs.Insert(msg)
+						break
 					}
 				}
 			}
@@ -230,7 +277,8 @@ func (s *server) serverMain() {
 	}
 }
 
-// handleIncomingMessages reads incoming messages from clients and signals them to the server
+// listen for packets from clients and unmarshal them into a Message struct
+// send the message to incomingMsgChan to be handled by the serverMain function
 func (s *server) handleIncomingMessages() {
 	sLog(s, "[Server handleIncomingMessages]", 1)
 
@@ -259,7 +307,13 @@ func (s *server) handleIncomingMessages() {
 	}
 }
 
-// Read reads a message from a client. If the server is closed, it returns an error
+// sends readRequestChan to the main function to read a message from a client (readRequest function)
+// if the return value of readResponseChan from readRequest is
+// (1) !ok: connID does not exist, it returns an error
+// (2) connID!=-1 && payload !=nil: it returns connID and payload
+// (3) connID!=-1 && payload ==nil: it removes the client by sending the ID
+// to removeClientChan (will be taken care in main function) and returns an error
+// (4) if Close() has been called on the server, it returns an error
 func (s *server) Read() (int, []byte, error) {
 	sLog(s, "[Server Read]", 1)
 	for {
@@ -282,7 +336,9 @@ func (s *server) Read() (int, []byte, error) {
 	}
 }
 
-// Write writes a message to a client. If the server is closed, it returns an error
+// sends writeRequestChan to the main function to write a message to a client (writeRequest function)
+// return a non-nil error only if the specified connection ID does not exist/client has disconnected
+// writeResponseChan is from writeRequest function
 func (s *server) Write(connId int, payload []byte) error {
 	sLog(s, "[Server Write]", 1)
 	writeMsg := &clientWriteRequest{
@@ -293,14 +349,15 @@ func (s *server) Write(connId int, payload []byte) error {
 	return <-s.writeResponseChan
 }
 
-// CloseConn closes a connection with a client of the given connection ID
+// closes a connection with a client by sending closeConnRequestChan to the main function
 func (s *server) CloseConn(connId int) error {
 	sLog(s, "[Server CloseConn]", 1)
 	s.closeConnRequestChan <- connId
 	return <-s.closeConnResponseChan
 }
 
-// Close closes the server
+// closes the server by sending serverShutdownChan to the main function
+// when there is no client left, it sends shutdownCompleteChan and finalizes the server
 func (s *server) Close() error {
 	sLog(s, "[Server Close]", 1)
 	defer s.conn.Close()
