@@ -132,7 +132,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		pendingRead:    NewPQ(),
 		pendingWrite:   NewPQ(),
 
-		logLvl: 0,
+		logLvl: 1,
 	}
 
 	// Launch Main Routine
@@ -222,7 +222,12 @@ func (c *client) main() {
 			switch msg.Type {
 			case MsgConnect:
 				cLog(c, "[Connect]", 1)
-				processSendConnect(c, msg)
+				success := processSendConnect(c, msg)
+				if success {
+					cLog(c, fmt.Sprintln("Sent to server", msg.ConnID, msg.Size), 1)
+				} else {
+					cLog(c, fmt.Sprintln("Failed to send"), 1)
+				}
 			case MsgData:
 				cLog(c, fmt.Sprintf("[Data]: %d\n", msg.SeqNum), 1)
 				processSendData(c, msg)

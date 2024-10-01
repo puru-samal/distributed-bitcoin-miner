@@ -142,10 +142,10 @@ func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) 
 }
 
 // read request handler
+// send readResponseChan to Read()
 func (s *server) readRequest() {
 	for id, client := range s.clientInfo {
 		res, ok := client.pendingPayload[client.readSeqNum]
-
 		// if the client is closed and there are no pending messages
 		if client.closed && len(client.pendingPayload) == 0 {
 			readRes := &readResponse{

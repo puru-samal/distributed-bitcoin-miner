@@ -153,7 +153,7 @@ func (s *server) serverMain() {
 			s.resendUnAckedMessages()
 
 		case clientMsg := <-s.incomingMsgChan:
-			sLog(s, "[Server incomingMsgChan]", 1)
+			sLog(s, "[Server incomingMsgChan]", 4)
 			messageType := clientMsg.message.Type
 			clientAddr := clientMsg.addr
 			connId := clientMsg.message.ConnID
@@ -192,13 +192,13 @@ func (s *server) serverMain() {
 
 		// Read a message from a client
 		case <-s.readRequestChan:
-			sLog(s, "[Server readRequestChan]", 1)
+			sLog(s, "[Server readRequestChan]", 4)
 			s.readRequest()
 
 		// Write a message to a client
 		// writeResponseChan is from Write()
 		case writeMsg := <-s.writeRequestChan:
-			sLog(s, "[Server writeRequestChan]", 1)
+			sLog(s, "[Server writeRequestChan]", 4)
 			s.writeRequest(writeMsg)
 
 		// If the client has no payload to read, it will remove the client
@@ -210,7 +210,7 @@ func (s *server) serverMain() {
 		// if the connection does not exist, it returns an error
 		// else it closes the connection
 		case id := <-s.closeConnRequestChan:
-			sLog(s, "[Server closeConnRequestChan]", 1)
+			sLog(s, "[Server closeConnRequestChan]", 4)
 			client, ok := s.clientInfo[id]
 			if !ok || client.closed {
 				sLog(s, "[Server closeConnRequestChan] connection not found", 4)
@@ -227,6 +227,7 @@ func (s *server) serverMain() {
 		case <-s.serverShutdownChan:
 			sLog(s, "[Server serverShutdownChan]", 4)
 			shuttingDown = true
+
 			for connId, client := range s.clientInfo {
 				if client.closed || (client.pendingMsgs.Empty() && client.unAckedMsgs.Empty()) {
 					sLog(s, fmt.Sprintf("[Close Check] unack: %s\n", client.unAckedMsgs.String()), 4)
@@ -234,8 +235,10 @@ func (s *server) serverMain() {
 					delete(s.clientInfo, connId)
 				}
 			}
+
 			// if there are no clients left, close the server
 			if len(s.clientInfo) == 0 {
+				sLog(s, "[Server serverShutdownChan] closeDoneChan", 4)
 				s.shutdownCompleteChan <- true
 				return
 			}
@@ -302,6 +305,7 @@ func (s *server) serverLostConnection() {
 	for {
 		select {
 		case <-s.serverLostConnectionChan:
+			sLog(s, "[Server serverLostConnection]", 4)
 			return
 		}
 	}
@@ -325,10 +329,7 @@ func (s *server) Read() (int, []byte, error) {
 		} else if readRes.connID != -1 {
 			s.removeClientChan <- readRes.connID
 			return readRes.connID, nil, errors.New("need to delete client")
-		} else if readRes.connID == -1 {
-			return 0, nil, errors.New("client does not exist")
 		}
-
 		if s.isClosed {
 			return 0, nil, errors.New("server is closed")
 		}
@@ -350,9 +351,9 @@ func (s *server) Write(connId int, payload []byte) error {
 
 // closes a connection with a client by sending closeConnRequestChan to the main function
 func (s *server) CloseConn(connId int) error {
-	if s.isClosed {
-		return errors.New("server is closed")
-	}
+	// if s.isClosed {
+	// 	return errors.New("server is closed")
+	// }
 	sLog(s, fmt.Sprintln("[Server CloseConn]"), 4)
 	s.closeConnRequestChan <- connId
 	return <-s.closeConnResponseChan
@@ -361,8 +362,8 @@ func (s *server) CloseConn(connId int) error {
 // closes the server by sending serverShutdownChan to the main function
 // when there is no client left, it sends shutdownCompleteChan and finalizes the server
 func (s *server) Close() error {
-	sLog(s, "[Server Close]", 4)
 	defer s.conn.Close()
+	sLog(s, "[Server Close]", 4)
 	s.serverShutdownChan <- true
 	<-s.shutdownCompleteChan
 	s.isClosed = true
