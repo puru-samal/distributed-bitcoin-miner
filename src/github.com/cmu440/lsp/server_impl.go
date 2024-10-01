@@ -218,10 +218,12 @@ func (s *server) serverMain() {
 		// Close() has been called on the server
 		// block until all pending messages to each client have been sent and acknowledged
 		case <-s.serverShutdownChan:
-			sLog(s, "[Server serverShutdownChan]", 1)
+			sLog(s, "[Server serverShutdownChan]", 4)
 			shuttingDown = true
 			for connId, client := range s.clientInfo {
 				if client.closed || (client.pendingMsgs.Empty() && client.unAckedMsgs.Empty()) {
+					sLog(s, fmt.Sprintf("[Close Check] unack: %s\n", client.unAckedMsgs.String()), 4)
+					sLog(s, fmt.Sprintf("[Close Check] pendM: %v\n", client.pendingMsgs.q), 4)
 					delete(s.clientInfo, connId)
 				}
 			}
@@ -351,7 +353,7 @@ func (s *server) Write(connId int, payload []byte) error {
 
 // closes a connection with a client by sending closeConnRequestChan to the main function
 func (s *server) CloseConn(connId int) error {
-	sLog(s, "[Server CloseConn]", 1)
+	sLog(s, "[Server CloseConn]", 4)
 	s.closeConnRequestChan <- connId
 	return <-s.closeConnResponseChan
 }
@@ -359,7 +361,7 @@ func (s *server) CloseConn(connId int) error {
 // closes the server by sending serverShutdownChan to the main function
 // when there is no client left, it sends shutdownCompleteChan and finalizes the server
 func (s *server) Close() error {
-	sLog(s, "[Server Close]", 1)
+	sLog(s, "[Server Close]", 4)
 	defer s.conn.Close()
 	s.isClosed = true
 	<-s.shutdownCompleteChan

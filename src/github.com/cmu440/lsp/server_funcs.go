@@ -124,6 +124,8 @@ func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) 
 
 	if success {
 		sLog(s, fmt.Sprintln("Removed message from unAckedMsgs", clientMsg.message.SeqNum, "of", clientMsg.message.ConnID), 4)
+		sLog(s, fmt.Sprintln("Remaining unAckedMsgs", len(client.unAckedMsgs.mp), "of", clientMsg.message.ConnID), 4)
+		sLog(s, fmt.Sprintln("Remaining pendingMsgs", len(client.pendingMsgs.q), "of", clientMsg.message.ConnID), 4)
 	}
 	if !success {
 		sLog(s, "[AckHandler] Error removing message from unAckedMsgs", 2)

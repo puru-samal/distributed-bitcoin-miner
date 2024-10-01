@@ -57,10 +57,8 @@ type client struct {
 	processInternal     chan *internalMsg
 
 	// TODO: timing
-	epochTimer   *time.Ticker
-	epFire       chan int
-	epLimFire    chan int
-	resetEpLimit chan int
+	epochTimer     *time.Ticker
+	epLimitCounter int
 
 	// msg send/recv/retry
 	newMsgSendChan chan *Message
@@ -116,7 +114,6 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		returnNewClient: make(chan int),
 		returnMain:      make(chan int),
 		returnReader:    make(chan int),
-		returnTimer:     make(chan int),
 
 		readReturnChan:      make(chan *internalMsg),
 		toBeRead:            nil,
@@ -126,10 +123,8 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		closeReturnChan:     make(chan *internalMsg),
 		processInternal:     make(chan *internalMsg),
 
-		epochTimer:   time.NewTicker(time.Duration(params.EpochMillis * int(time.Millisecond))),
-		epFire:       make(chan int),
-		epLimFire:    make(chan int),
-		resetEpLimit: make(chan int),
+		epochTimer:     time.NewTicker(time.Duration(params.EpochMillis * int(time.Millisecond))),
+		epLimitCounter: 0,
 
 		newMsgSendChan: make(chan *Message),
 		msgRecvChan:    make(chan *Message),
@@ -145,7 +140,6 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	// Launch Epoch Timer
 	go c.main()
 	go c.reader()
-	go c.timer()
 
 	// Signal main to send NewConnect message
 	// Block until connID set or EpochLimit reached
@@ -176,7 +170,11 @@ func (c *client) ConnID() int {
 func (c *client) Read() ([]byte, error) {
 	cLog(c, "[Client Read]", 1)
 	resp := <-c.readReturnChan
-	return resp.msg.Payload, resp.err
+
+	if resp.msg != nil {
+		return resp.msg.Payload, resp.err
+	}
+	return nil, errors.New("connection lost/dropped")
 }
 
 // Creates and sends a data message with 0 id, sn, checksum
@@ -192,26 +190,23 @@ func (c *client) Write(payload []byte) error {
 
 // TODO:
 func (c *client) Close() error {
-	cLog(c, "[Client close]", 1)
+	defer c.clientConn.Close()
+	cLog(c, "[Client Close]", 1)
 	c.processInternal <- &internalMsg{mtype: Close}
-	for {
-		select {
-		case req := <-c.closeReturnChan:
-			c.returnMain <- 1
-			c.returnReader <- 1
-			c.returnTimer <- 1
-			return req.err
-
-		case <-c.closeProcessingChan:
-			c.processInternal <- &internalMsg{mtype: Close}
-		}
-	}
+	req := <-c.closeReturnChan
+	return req.err
 }
 
 func (c *client) main() {
 	for {
+
+		if (c.state == Lost && c.toBeRead == nil) || c.state == Closing {
+			c.toBeRead = &internalMsg{mtype: Read, msg: nil}
+		}
+
 		var readActiveChan chan *internalMsg
 		if c.toBeRead != nil {
+			cLog(c, fmt.Sprintf("[state]: %d\n", c.state), 1)
 			cLog(c, "[readActiveChan] activated", 1)
 			readActiveChan = c.readReturnChan
 		}
@@ -230,7 +225,7 @@ func (c *client) main() {
 				processSendConnect(c, msg)
 			case MsgData:
 				cLog(c, fmt.Sprintf("[Data]: %d\n", msg.SeqNum), 1)
-				processSendNewData(c, msg)
+				processSendData(c, msg)
 			}
 
 		case msg := <-c.msgRecvChan:
@@ -253,79 +248,55 @@ func (c *client) main() {
 
 			case Write:
 
-				c.writeSeqNum++
-				validateWriteInternal(c, req)
 				if c.state == Closing || c.state == Lost {
 					req.err = errors.New("client closed/lost")
+					c.writeReturnChan <- req
 				}
 
 				if c.state == Active {
-					sent := processSendNewData(c, req.msg)
+					c.writeSeqNum++
+					validateWriteInternal(c, req)
+					sent := processSendData(c, req.msg)
 					if sent {
 						cLog(c, fmt.Sprintf("[Write proc'd] %d\n", req.msg.SeqNum), 2)
 					} else {
 						cLog(c, fmt.Sprintf("[Write pend'n] %d\n", req.msg.SeqNum), 2)
 					}
 					cLog(c, fmt.Sprintf("[Swin state] %s\n", c.unAckedMsgs.String()), 3)
+					c.writeReturnChan <- req
 				}
 
-				c.writeReturnChan <- req
-
 			case Close:
-				// TODO: Send all msgs in Unacked messages
-				// TODO: Send 0 to closeProcessingChan
-				c.state = Closing
-				if !c.unAckedMsgs.Empty() {
-					for !c.unAckedMsgs.Empty() {
-						msg, _ := c.unAckedMsgs.GetMinMsg()
-						sendToServer(c.clientConn, msg)
-					}
-					c.closeProcessingChan <- 1
-				} else {
-					c.clientConn.Close()
+
+				if c.state == Lost {
 					c.closeReturnChan <- &internalMsg{mtype: Close, err: nil}
+					return
+				}
+				c.state = Closing
+				if c.state == Closing && c.unAckedMsgs.Empty() && c.pendingWrite.Empty() {
+					c.epochTimer.Stop()
+					close(c.returnReader)
+					c.closeReturnChan <- &internalMsg{mtype: Close, err: nil}
+					return
 				}
 			}
 		case readActiveChan <- c.toBeRead:
-			cLog(c, fmt.Sprintf("[!Read] %d\n", c.toBeRead.msg.SeqNum), 1)
-
-			if pqmsg, exist := c.pendingRead.GetMin(); exist == nil && c.toBeRead.msg.SeqNum == pqmsg.SeqNum {
-				c.pendingRead.RemoveMin()
-			}
-
-			c.toBeRead = nil
-			c.readSeqNum++
-
-			if pqmsg, exist := c.pendingRead.GetMin(); exist == nil && pqmsg.SeqNum == c.readSeqNum {
-				c.pendingRead.RemoveMin()
-				var err error
-				if c.state == Closing || (c.state == Lost && c.pendingRead.Empty()) {
-					err = errors.New("client closed or conn lost")
-				}
-				c.toBeRead = &internalMsg{mtype: Read, msg: pqmsg, err: err}
-				cLog(c, fmt.Sprintf("[toBeRead]: %d\n", pqmsg.SeqNum), 2)
-			}
+			processRead(c)
 
 		case <-c.epochTimer.C:
+
 			cLog(c, "[epFire]", 2)
 			if c.state == Connect {
 				processReSendConnect(c)
-			} else {
-				isheartbeat := processReSendDataOrHeartbeat(c)
-				if !isheartbeat {
-					c.resetEpLimit <- 1
-				}
+				c.epLimitCounter++
+			} else if c.state == Active || c.state == Closing {
+				processReSendDataOrHeartbeat(c)
 			}
+			c.epLimitCounter++
 
-		case <-c.epLimFire:
-			cLog(c, "[epLimFire]", 2)
-			if c.state == Connect {
-				c.connFailed <- 1
-			} else {
-				c.state = Lost
-				c.returnReader <- 1
-				c.returnTimer <- 1
-				return
+			if c.epLimitCounter == c.params.EpochLimit {
+				cLog(c, "[EpochLimit]", 2)
+				processEpochLimit(c)
 			}
 		}
 	}
@@ -343,21 +314,6 @@ func (c *client) reader() {
 			if err == nil {
 				c.msgRecvChan <- &msg
 			}
-		}
-	}
-}
-
-func (c *client) timer() {
-	//epochTimer := time.NewTicker(time.Duration(c.params.EpochMillis * int(time.Millisecond)))
-	epochLimitTimer := time.NewTimer(time.Duration(c.params.EpochMillis*c.params.EpochLimit) * time.Millisecond)
-	for {
-		select {
-		case <-c.returnTimer:
-			cLog(c, "returning: timer", 1)
-			return
-
-		case <-c.resetEpLimit:
-			epochLimitTimer.Reset(time.Duration(c.params.EpochMillis*c.params.EpochLimit) * time.Millisecond)
 		}
 	}
 }

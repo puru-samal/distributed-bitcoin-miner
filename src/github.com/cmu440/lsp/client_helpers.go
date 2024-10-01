@@ -97,26 +97,31 @@ func processSendConnect(c *client, msg *Message) bool {
 	return sent
 }
 
+// Resend NewConnect to server
+func processReSendConnect(c *client) bool {
+	msg := NewConnect(c.writeSeqNum)
+	sent := sendToServer(c.clientConn, msg)
+	return sent
+}
+
 // Attempt to put in sliding window,
 // If valid, send, else put in pendingWrite
-func processSendNewData(c *client, msg *Message) bool {
+func processSendData(c *client, msg *Message) bool {
 	sent := false
 	if !(c.state == Active) || (c.state == Closing) {
 		return sent
 	}
+
+	if c.state == Closing && c.unAckedMsgs.In(msg.SeqNum) {
+		return sent
+	}
+
 	isValid := c.unAckedMsgs.Put(msg.SeqNum, msg)
 	if isValid {
 		sent = sendToServer(c.clientConn, msg)
 	} else {
 		c.pendingWrite.Insert(msg)
 	}
-	return sent
-}
-
-// Resend NewConnect to server
-func processReSendConnect(c *client) bool {
-	msg := NewConnect(c.writeSeqNum)
-	sent := sendToServer(c.clientConn, msg)
 	return sent
 }
 
@@ -192,6 +197,8 @@ func processRecvData(c *client, msg *Message) {
 	ackMsg := NewAck(c.connID, msg.SeqNum)
 	processSendAcks(c, ackMsg)
 	cLog(c, fmt.Sprintf("[DataAck]: %d\n", ackMsg.SeqNum), 2)
+	cLog(c, "EpochLimit reset", 3)
+	c.epLimitCounter = 0
 }
 
 // Connect : If valid ack for connect, init sliding window, signal NewClient to return
@@ -226,6 +233,45 @@ func processRecvAcks(c *client, msg *Message) {
 				cLog(c, fmt.Sprintf("[pendingWrite]: %d\n", pqmsg.SeqNum), 2)
 			}
 		}
+
+		if c.state == Closing && c.unAckedMsgs.Empty() && c.pendingWrite.Empty() {
+			c.closeReturnChan <- &internalMsg{mtype: Close, err: nil}
+		}
 	}
 	cLog(c, "EpochLimit reset", 3)
+	c.epLimitCounter = 0
+}
+
+// Function Handling
+
+func processRead(c *client) {
+	if c.state == Active || (c.state == Lost && c.toBeRead != nil) {
+		if c.toBeRead.msg == nil {
+			return
+		}
+
+		cLog(c, fmt.Sprintf("[!Read] %d\n", c.toBeRead.msg.SeqNum), 1)
+		if pqmsg, exist := c.pendingRead.GetMin(); exist == nil && c.toBeRead.msg.SeqNum == pqmsg.SeqNum {
+			c.pendingRead.RemoveMin()
+		}
+
+		c.toBeRead = nil
+		c.readSeqNum++
+
+		if pqmsg, exist := c.pendingRead.GetMin(); exist == nil && pqmsg.SeqNum == c.readSeqNum {
+			c.pendingRead.RemoveMin()
+			c.toBeRead = &internalMsg{mtype: Read, msg: pqmsg, err: nil}
+			cLog(c, fmt.Sprintf("[toBeRead]: %d\n", pqmsg.SeqNum), 2)
+		}
+	}
+}
+
+func processEpochLimit(c *client) {
+	if c.state == Connect {
+		c.connFailed <- 1
+	} else {
+		c.state = Lost
+		c.epochTimer.Stop()
+		close(c.returnReader)
+	}
 }
