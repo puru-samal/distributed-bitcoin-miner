@@ -34,10 +34,9 @@ type server struct {
 	removeClientChan      chan int
 
 	// Channels for server close
-	isClosed                 bool
-	serverShutdownChan       chan bool
-	shutdownCompleteChan     chan bool
-	serverLostConnectionChan chan bool
+	isClosed             bool
+	serverShutdownChan   chan bool
+	shutdownCompleteChan chan bool
 
 	// Logging level
 	logLvl int
@@ -75,10 +74,10 @@ type clientInfo struct {
 	unAckedMsgs *sWindowMap
 	pendingMsgs *priorityQueue
 
-	// Status of the Client (has received data, has sent data, closed)
-	hasReceivedData bool
-	hasSentData     bool
-	closed          bool
+	// Status of the Client
+	hasReceivedData bool // client has sent data to the server
+	hasSentData     bool // client has received data from the server
+	isClosed        bool // client has closed the connection
 
 	// Number of epochs since the client has received a message
 	unReceivedNum int
@@ -122,19 +121,18 @@ func NewServer(port int, params *Params) (Server, error) {
 		closeConnResponseChan: make(chan error),
 		removeClientChan:      make(chan int),
 
-		isClosed:                 false,
-		serverShutdownChan:       make(chan bool),
-		shutdownCompleteChan:     make(chan bool),
-		serverLostConnectionChan: make(chan bool),
+		isClosed:             false,
+		serverShutdownChan:   make(chan bool),
+		shutdownCompleteChan: make(chan bool),
 
 		logLvl: 0,
 	}
 
+	// read routine for the server
 	go server.handleIncomingMessages()
 
+	// main routine for the server
 	go server.serverMain()
-
-	go server.serverLostConnection()
 
 	return server, nil
 }
@@ -150,13 +148,13 @@ func (s *server) serverMain() {
 			sLog(s, "[servEpochFire]", 4)
 			// Acknowledgement to clients that have not received any messages during the last epoch
 			s.sendHeartbeatMessages()
-			s.resendUnAckedMessages()
+			s.resendUAckedMessages()
 
 		case clientMsg := <-s.incomingMsgChan:
 			sLog(s, "[Server incomingMsgChan]", 4)
 			messageType := clientMsg.message.Type
 			clientAddr := clientMsg.addr
-			connId := clientMsg.message.ConnID
+			connID := clientMsg.message.ConnID
 			// Handle the message based on its type
 			switch messageType {
 			// Connect
@@ -164,28 +162,28 @@ func (s *server) serverMain() {
 				sLog(s, fmt.Sprintf("[Connect:recv]: %d\n", clientMsg.message.SeqNum), 4)
 				alreadyConnected := s.checkConnection(clientMsg, clientAddr)
 				if alreadyConnected {
-					continue
+					return
 				}
 			// Data
 			case MsgData:
 				sLog(s, fmt.Sprintf("[Data:recv]: %d\n", clientMsg.message.SeqNum), 4)
-				s.DataHandler(clientMsg, clientAddr, connId)
+				s.processDataHandler(clientMsg, clientAddr, connID)
 			// Acknowledgement
 			case MsgAck:
 				sLog(s, fmt.Sprintf("[Ack:recv]: %d\n", clientMsg.message.SeqNum), 4)
-				acknowledged := s.AckHandler(clientMsg, connId, shuttingDown)
+				acknowledged := s.processAckHandler(clientMsg, connID, shuttingDown)
 				if acknowledged {
 					return
 				}
 			// Cumulative Acknowledgement
 			case MsgCAck:
 				sLog(s, fmt.Sprintf("[CAck:recv]: %d\n", clientMsg.message.SeqNum), 4)
-				cacknowledged := s.CAckHandler(clientMsg, connId, shuttingDown)
+				cacknowledged := s.processCAckHandler(clientMsg, connID, shuttingDown)
 				if cacknowledged {
 					return
 				}
 			}
-			if client, ok := s.clientInfo[connId]; ok {
+			if client, ok := s.clientInfo[connID]; ok {
 				client.hasReceivedData = true
 				client.unReceivedNum = 0
 			}
@@ -212,13 +210,13 @@ func (s *server) serverMain() {
 		case id := <-s.closeConnRequestChan:
 			sLog(s, "[Server closeConnRequestChan]", 4)
 			client, ok := s.clientInfo[id]
-			if !ok || client.closed {
+			if !ok || client.isClosed {
 				sLog(s, "[Server closeConnRequestChan] connection not found", 4)
 				s.closeConnResponseChan <- errors.New("connection not found")
 			} else {
 				// close the connection
 				sLog(s, fmt.Sprintln("[Server closeConnRequestChan] client Close", id), 4)
-				client.closed = true
+				client.isClosed = true
 				s.closeConnResponseChan <- nil
 			}
 
@@ -229,7 +227,7 @@ func (s *server) serverMain() {
 			shuttingDown = true
 
 			for connId, client := range s.clientInfo {
-				if client.closed || (client.pendingMsgs.Empty() && client.unAckedMsgs.Empty()) {
+				if client.isClosed || (client.pendingMsgs.Empty() && client.unAckedMsgs.Empty()) {
 					sLog(s, fmt.Sprintf("[Close Check] unack: %s\n", client.unAckedMsgs.String()), 4)
 					sLog(s, fmt.Sprintf("[Close Check] pendM: %v\n", client.pendingMsgs.q), 4)
 					delete(s.clientInfo, connId)
@@ -243,6 +241,8 @@ func (s *server) serverMain() {
 				return
 			}
 
+		// move the pending messages to the unAcked queue as many as possible
+		// the peneding message needs to be in range or the unAcked queue is empty
 		default:
 			sLog(s, "[Server default]", 1)
 			for _, client := range s.clientInfo {
@@ -301,23 +301,12 @@ func (s *server) handleIncomingMessages() {
 	}
 }
 
-func (s *server) serverLostConnection() {
-	for {
-		select {
-		case <-s.serverLostConnectionChan:
-			sLog(s, "[Server serverLostConnection]", 4)
-			return
-		}
-	}
-}
-
 // sends readRequestChan to the main function to read a message from a client (readRequest function)
 // if the return value of readResponseChan from readRequest is
-// (1) !ok: connID does not exist, it returns an error
-// (2) connID!=-1 && payload !=nil: it returns connID and payload
-// (3) connID!=-1 && payload ==nil: it removes the client by sending the ID
+// (1) connID!=-1 && payload !=nil: it returns connID and payload
+// (2) connID!=-1 && payload ==nil: it removes the client by sending the ID
 // to removeClientChan (will be taken care in main function) and returns an error
-// (4) if Close() has been called on the server, it returns an error
+// (3) if Close() has been called on the server, it returns an error
 func (s *server) Read() (int, []byte, error) {
 	sLog(s, "[Server Read]", 1)
 	for {
@@ -351,9 +340,6 @@ func (s *server) Write(connId int, payload []byte) error {
 
 // closes a connection with a client by sending closeConnRequestChan to the main function
 func (s *server) CloseConn(connId int) error {
-	// if s.isClosed {
-	// 	return errors.New("server is closed")
-	// }
 	sLog(s, fmt.Sprintln("[Server CloseConn]"), 4)
 	s.closeConnRequestChan <- connId
 	return <-s.closeConnResponseChan
@@ -367,6 +353,5 @@ func (s *server) Close() error {
 	s.serverShutdownChan <- true
 	<-s.shutdownCompleteChan
 	s.isClosed = true
-	s.serverLostConnectionChan <- true
 	return nil
 }

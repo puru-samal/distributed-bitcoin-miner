@@ -52,7 +52,7 @@ func (s *server) checkConnection(clientMsg *clientMessage, clientAddr *lspnet.UD
 		pendingMsgs:     NewPQ(),
 		hasReceivedData: true,
 		hasSentData:     true,
-		closed:          false,
+		isClosed:        false,
 	}
 	s.clientInfo[newConnID] = newClient
 
@@ -79,9 +79,10 @@ func (s *server) checkConnection(clientMsg *clientMessage, clientAddr *lspnet.UD
 // check if the message is corrupted or not
 // if not truncate the payload to message size and save it into the pendingPayload of the client for future read requests
 // also send NewAck for the received message
-func (s *server) DataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAddr, connID int) {
+func (s *server) processDataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAddr, connID int) {
 	payload := clientMsg.message.Payload
-	// check if the messages is corrupted
+	// if the size of the received data is shorter than the given size included in the message
+	// if the messages is corrupted
 	checkSum := CalculateChecksum(connID, clientMsg.message.SeqNum, len(payload), payload)
 	if clientMsg.message.Size > len(payload) || (clientMsg.message.Size == len(payload) && checkSum != clientMsg.message.Checksum) {
 		client, ok := s.clientInfo[connID]
@@ -91,7 +92,8 @@ func (s *server) DataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAdd
 		}
 		return
 	}
-	// truncate the payload
+	// in case the size of the data is longer than the given size included in the message
+	// truncate the payload to the given size
 	clientMsg.message.Payload = clientMsg.message.Payload[:clientMsg.message.Size]
 
 	client := s.clientInfo[connID]
@@ -112,7 +114,7 @@ func (s *server) DataHandler(clientMsg *clientMessage, clientAddr *lspnet.UDPAdd
 // remove the message from the unAckedMsgs of the client
 // if the server is closing and there are no pending messages and unAcked messages, delete the client
 // if there are no clients left, send a signal to the shutdownCompleteChan
-func (s *server) AckHandler(clientMsg *clientMessage, connID int, closing bool) bool {
+func (s *server) processAckHandler(clientMsg *clientMessage, connID int, closing bool) bool {
 	acknowledged := false
 
 	// if it is a heartbeat message
@@ -147,7 +149,7 @@ func (s *server) readRequest() {
 	for id, client := range s.clientInfo {
 		res, ok := client.pendingPayload[client.readSeqNum]
 		// if the client is closed and there are no pending messages
-		if client.closed && len(client.pendingPayload) == 0 {
+		if client.isClosed && len(client.pendingPayload) == 0 {
 			readRes := &readResponse{
 				connID:  id,
 				payload: nil,
@@ -176,7 +178,7 @@ func (s *server) readRequest() {
 // write request is added to the pendingMsgs of the client
 func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 	client, ok := s.clientInfo[writeMsg.connID]
-	if !ok || client.closed {
+	if !ok || client.isClosed {
 		s.writeResponseChan <- errors.New("connection not found")
 	} else {
 		checkSum := CalculateChecksum(writeMsg.connID, client.writeSeqNum, len(writeMsg.payload), writeMsg.payload)
@@ -198,7 +200,7 @@ func (s *server) writeRequest(writeMsg *clientWriteRequest) {
 // resend unacknowledged/dropped messages
 // currBackoff: number of epochs we wait before resending the data (that did not receive ACK)
 // maxBackOffInterval: maximum amount of epochs we wait w/o retrying to transmit the data
-func (s *server) resendUnAckedMessages() {
+func (s *server) resendUAckedMessages() {
 	for _, client := range s.clientInfo {
 
 		retryMsgs, exist := client.unAckedMsgs.UpdateBackoffs(s.params.MaxBackOffInterval)
@@ -227,18 +229,18 @@ func (s *server) resendUnAckedMessages() {
 // send a heartbeat message to the client
 func (s *server) sendHeartbeatMessages() {
 	for _, client := range s.clientInfo {
-		// Close client due to EpochLimit
-		if !client.hasReceivedData && !client.closed {
+		if !client.hasReceivedData && !client.isClosed {
 			client.unReceivedNum += 1
+			// Close client due to EpochLimit
 			if client.unReceivedNum >= s.params.EpochLimit {
-				client.closed = true
+				client.isClosed = true
 			}
 		}
 		client.hasReceivedData = false
 	}
 
 	for connID, client := range s.clientInfo {
-		if !client.hasSentData && !client.closed {
+		if !client.hasSentData && !client.isClosed {
 			s.sendMessage(NewAck(connID, 0), client.addr)
 		}
 		client.hasSentData = false
@@ -246,8 +248,12 @@ func (s *server) sendHeartbeatMessages() {
 
 }
 
-func (s *server) CAckHandler(clientMsg *clientMessage, connID int, closing bool) bool {
+// if the minimum sequence number of the unAckedMsgs of the client is less than or equal to the sequence number of the clientMsg
+// remove the messages from the unAckedMsgs queue to update the lower bound of the sliding window
+// if the server is closing and there are no pending messages and unAcked messages, delete the client
+func (s *server) processCAckHandler(clientMsg *clientMessage, connID int, closing bool) bool {
 	cacknowledged := false
+	// if it is a heartbeat message
 	if clientMsg.message.SeqNum == 0 {
 		return cacknowledged
 	}
