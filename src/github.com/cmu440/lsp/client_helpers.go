@@ -59,6 +59,8 @@ func initClientAfterConnect(c *client, msg *Message) {
 	UB := LB + c.params.WindowSize
 	mSz := c.params.MaxUnackedMessages
 	c.unAckedMsgs.Reinit(LB, UB, mSz)
+	rLB, rUB := c.readSeqNum, c.readSeqNum+c.params.WindowSize
+	c.unProcData.Reinit(rLB, rUB, c.params.WindowSize)
 	c.returnNewClient <- 1
 }
 
@@ -77,7 +79,6 @@ func validateWriteInternal(c *client, req *internalMsg) {
 func returnAll(c *client) {
 	c.returnMain <- 1
 	c.returnReader <- 1
-	c.returnTimer <- 1
 }
 
 // Message Sending
@@ -170,11 +171,10 @@ func processRecvData(c *client, msg *Message) {
 	if c.state != Active {
 		return
 	}
-
-	LB, UB := c.readSeqNum, c.readSeqNum+c.params.WindowSize
-	if LB <= msg.SeqNum && msg.SeqNum < UB {
-		hasIntegrity := checkIntegrity(msg)
-		if hasIntegrity {
+	hasIntegrity := checkIntegrity(msg)
+	if hasIntegrity {
+		isValid := c.unProcData.Put(msg.SeqNum, msg)
+		if isValid && msg.SeqNum == c.readSeqNum {
 			if msg.SeqNum == c.readSeqNum {
 				cLog(c, fmt.Sprintf("[toBeRead]: %d\n", msg.SeqNum), 2)
 				var err error
@@ -183,15 +183,12 @@ func processRecvData(c *client, msg *Message) {
 				}
 				c.toBeRead = &internalMsg{mtype: Read, msg: msg, err: err}
 			} else {
-				if msg.SeqNum > c.readSeqNum {
-					cLog(c, fmt.Sprintf("[pendingRead]: %d\n", msg.SeqNum), 2)
-					c.pendingRead.Insert(msg)
-				}
-
+				cLog(c, fmt.Sprintf("[pendingRead]: %d\n", msg.SeqNum), 2)
 			}
+		} else {
+			cLog(c, fmt.Sprintf("[OOB]: %d\n", msg.SeqNum), 2)
+			c.pendingRead.Insert(msg)
 		}
-	} else {
-		cLog(c, fmt.Sprintf("[DroppedRead:OOB]: %d\n", msg.SeqNum), 2)
 	}
 
 	ackMsg := NewAck(c.connID, msg.SeqNum)
@@ -251,17 +248,27 @@ func processRead(c *client) {
 		}
 
 		cLog(c, fmt.Sprintf("[!Read] %d\n", c.toBeRead.msg.SeqNum), 1)
-		if pqmsg, exist := c.pendingRead.GetMin(); exist == nil && c.toBeRead.msg.SeqNum == pqmsg.SeqNum {
+		c.unProcData.Remove(c.toBeRead.msg.SeqNum)
+		for {
+			pqmsg, exist := c.pendingRead.GetMin()
+			if exist != nil {
+				break
+			}
+			isValid := c.unProcData.Put(pqmsg.SeqNum, pqmsg)
+			if !isValid {
+				break
+			}
 			c.pendingRead.RemoveMin()
+			cLog(c, fmt.Sprintf("[OOB] -> [pendingRead]: %d\n", pqmsg.SeqNum), 2)
 		}
 
 		c.toBeRead = nil
 		c.readSeqNum++
 
-		if pqmsg, exist := c.pendingRead.GetMin(); exist == nil && pqmsg.SeqNum == c.readSeqNum {
-			c.pendingRead.RemoveMin()
-			c.toBeRead = &internalMsg{mtype: Read, msg: pqmsg, err: nil}
-			cLog(c, fmt.Sprintf("[toBeRead]: %d\n", pqmsg.SeqNum), 2)
+		if rmsg, exist := c.unProcData.Get(c.readSeqNum); exist {
+			c.unProcData.Remove(c.readSeqNum)
+			c.toBeRead = &internalMsg{mtype: Read, msg: rmsg, err: nil}
+			cLog(c, fmt.Sprintf("[toBeRead]: %d\n", rmsg.SeqNum), 2)
 		}
 	}
 }

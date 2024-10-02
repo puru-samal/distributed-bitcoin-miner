@@ -45,31 +45,30 @@ type client struct {
 	returnNewClient chan int
 	returnMain      chan int
 	returnReader    chan int
-	returnTimer     chan int
 
 	// Read | Write | ConnID
-	toBeRead            *internalMsg
-	readReturnChan      chan *internalMsg
-	connIDReturnChan    chan *internalMsg
-	writeReturnChan     chan *internalMsg
-	closeProcessingChan chan int
-	closeReturnChan     chan *internalMsg
-	processInternal     chan *internalMsg
+	toBeRead         *internalMsg
+	readReturnChan   chan *internalMsg
+	connIDReturnChan chan *internalMsg
+	writeReturnChan  chan *internalMsg
+	closeReturnChan  chan *internalMsg
+	processInternal  chan *internalMsg
 
-	// TODO: timing
+	// Timing
 	epochTimer     *time.Ticker
 	epLimitCounter int
 
-	// msg send/recv/retry
+	// Msg Send | Recv/
 	newMsgSendChan chan *Message
 	msgRecvChan    chan *Message
 
-	// internal data structures
+	// Internal Data Structures
 	unAckedMsgs  *sWindowMap
+	unProcData   *sWindowMap
 	pendingRead  *priorityQueue
 	pendingWrite *priorityQueue
 
-	// logging
+	// Logging
 	logLvl int
 }
 
@@ -115,13 +114,12 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		returnMain:      make(chan int),
 		returnReader:    make(chan int),
 
-		readReturnChan:      make(chan *internalMsg),
-		toBeRead:            nil,
-		writeReturnChan:     make(chan *internalMsg),
-		connIDReturnChan:    make(chan *internalMsg),
-		closeProcessingChan: make(chan int),
-		closeReturnChan:     make(chan *internalMsg),
-		processInternal:     make(chan *internalMsg),
+		readReturnChan:   make(chan *internalMsg),
+		toBeRead:         nil,
+		writeReturnChan:  make(chan *internalMsg),
+		connIDReturnChan: make(chan *internalMsg),
+		closeReturnChan:  make(chan *internalMsg),
+		processInternal:  make(chan *internalMsg),
 
 		epochTimer:     time.NewTicker(time.Duration(params.EpochMillis * int(time.Millisecond))),
 		epLimitCounter: 0,
@@ -129,19 +127,19 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		newMsgSendChan: make(chan *Message),
 		msgRecvChan:    make(chan *Message),
 		unAckedMsgs:    NewSWM(0, 1, 1),
+		unProcData:     NewSWM(0, 1, 1),
 		pendingRead:    NewPQ(),
 		pendingWrite:   NewPQ(),
 
-		logLvl: 1,
+		logLvl: 0,
 	}
 
 	// Launch Main Routine
 	// Launch Read Routine
-	// Launch Epoch Timer
 	go c.main()
 	go c.reader()
 
-	// Signal main to send NewConnect message
+	// Send NewConnect to main
 	// Block until connID set or EpochLimit reached
 	c.newMsgSendChan <- NewConnect(initialSeqNum)
 	select {
@@ -165,12 +163,13 @@ func (c *client) ConnID() int {
 }
 
 // Sends an internalMsg to Main
-// Main blocks until the data message with sn:writeSeqNum is available
+// Main blocks until the data message with sn:readSeqNum is available
 // Once available, Read returns
+// On state:Closing w/ no pending messages left, or on state:Lost
+// The Internal msg will have a nil msg, indicating that read should return an error
 func (c *client) Read() ([]byte, error) {
 	cLog(c, "[Client Read]", 1)
 	resp := <-c.readReturnChan
-
 	if resp.msg != nil {
 		return resp.msg.Payload, resp.err
 	}
@@ -179,7 +178,7 @@ func (c *client) Read() ([]byte, error) {
 
 // Creates and sends a data message with 0 id, sn, checksum
 // Main validates (assigns id, sn, checksum, errors) and sends the the message
-// Sends the err back to Write
+// If state:Closing or state:Lost, nothing is sent, an error is sent back immediately
 func (c *client) Write(payload []byte) error {
 	cLog(c, "[Client Write]", 1)
 	wr_msg := NewData(0, 0, len(payload), payload, 0)
@@ -188,7 +187,9 @@ func (c *client) Write(payload []byte) error {
 	return resp.err
 }
 
-// TODO:
+// Close sends an internalRequest
+// closeReturnChan becomes available once
+// all close conditions have been met or conn is lost,
 func (c *client) Close() error {
 	defer c.clientConn.Close()
 	cLog(c, "[Client Close]", 1)
@@ -200,7 +201,7 @@ func (c *client) Close() error {
 func (c *client) main() {
 	for {
 
-		if (c.state == Lost && c.toBeRead == nil) || c.state == Closing {
+		if (c.state == Lost && c.pendingRead.Empty() && c.unProcData.Empty() && c.toBeRead == nil) || (c.state == Closing) {
 			c.toBeRead = &internalMsg{mtype: Read, msg: nil}
 		}
 
@@ -208,6 +209,7 @@ func (c *client) main() {
 		if c.toBeRead != nil {
 			cLog(c, fmt.Sprintf("[state]: %d\n", c.state), 1)
 			cLog(c, "[readActiveChan] activated", 1)
+			cLog(c, fmt.Sprintf("[#PendingRead]: %d\n", c.pendingRead.Size()), 1)
 			readActiveChan = c.readReturnChan
 		}
 
@@ -240,9 +242,17 @@ func (c *client) main() {
 			case MsgData:
 				cLog(c, fmt.Sprintf("[Data]: %d\n", msg.SeqNum), 1)
 				processRecvData(c, msg)
-			case MsgAck, MsgCAck:
+			case MsgAck:
 				cLog(c, fmt.Sprintf("[Ack]: %d\n", msg.SeqNum), 1)
 				processRecvAcks(c, msg)
+			case MsgCAck:
+				cLog(c, fmt.Sprintf("[CAck]: %d\n", msg.SeqNum), 1)
+				lower := c.unAckedMsgs.LB
+				for i := lower; i <= msg.SeqNum; i++ {
+					ack := NewAck(c.connID, i)
+					processRecvAcks(c, ack)
+				}
+
 			}
 
 		case req := <-c.processInternal:

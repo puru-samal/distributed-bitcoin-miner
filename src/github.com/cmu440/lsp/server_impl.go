@@ -127,7 +127,7 @@ func NewServer(port int, params *Params) (Server, error) {
 		shutdownCompleteChan:     make(chan bool),
 		serverLostConnectionChan: make(chan bool),
 
-		logLvl: 4,
+		logLvl: 0,
 	}
 
 	go server.handleIncomingMessages()
