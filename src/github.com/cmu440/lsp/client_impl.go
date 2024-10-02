@@ -12,6 +12,8 @@ import (
 )
 
 // Helper types
+
+// Type for clients internal state
 type ClientState int
 
 const (
@@ -21,6 +23,7 @@ const (
 	Lost                       // Conn lost State
 )
 
+// A type for internal requests
 type InternalType int
 
 const (
@@ -31,7 +34,8 @@ const (
 )
 
 type client struct {
-	// internal state
+
+	// Internal client state
 	state       ClientState
 	serverAddr  *lspnet.UDPAddr
 	clientConn  *lspnet.UDPConn
@@ -58,9 +62,9 @@ type client struct {
 	epochTimer     *time.Ticker
 	epLimitCounter int
 
-	// Msg Send | Recv/
-	newMsgSendChan chan *Message
-	msgRecvChan    chan *Message
+	// Msg Send | Recv ch
+	newConnectSendChan chan *Message
+	msgRecvChan        chan *Message
 
 	// Internal Data Structures
 	unAckedMsgs  *sWindowMap
@@ -124,12 +128,12 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		epochTimer:     time.NewTicker(time.Duration(params.EpochMillis * int(time.Millisecond))),
 		epLimitCounter: 0,
 
-		newMsgSendChan: make(chan *Message),
-		msgRecvChan:    make(chan *Message),
-		unAckedMsgs:    NewSWM(0, 1, 1),
-		unProcData:     NewSWM(0, 1, 1),
-		pendingRead:    NewPQ(),
-		pendingWrite:   NewPQ(),
+		newConnectSendChan: make(chan *Message),
+		msgRecvChan:        make(chan *Message),
+		unAckedMsgs:        NewSWM(0, 1, 1),
+		unProcData:         NewSWM(0, 1, 1),
+		pendingRead:        NewPQ(),
+		pendingWrite:       NewPQ(),
 
 		logLvl: 0,
 	}
@@ -141,14 +145,14 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 
 	// Send NewConnect to main
 	// Block until connID set or EpochLimit reached
-	c.newMsgSendChan <- NewConnect(initialSeqNum)
+	c.newConnectSendChan <- NewConnect(initialSeqNum)
 	select {
 	case <-c.connFailed:
 		returnAll(c)
 		return nil, errors.New("connection could not be established")
 	case <-c.returnNewClient:
-		log.Println("Client -> Connected!")
-		log.Printf("Params %s\n", c.params.String())
+		cLog(c, "Client -> Connected!", 1)
+		cLog(c, fmt.Sprintf("Params %s\n", c.params.String()), 1)
 		return c, nil
 	}
 }
@@ -188,127 +192,136 @@ func (c *client) Write(payload []byte) error {
 }
 
 // Close sends an internalRequest
-// closeReturnChan becomes available once
+// closeReturnChan becomes available once:
 // all close conditions have been met or conn is lost,
 func (c *client) Close() error {
 	defer c.clientConn.Close()
 	cLog(c, "[Client Close]", 1)
 	c.processInternal <- &internalMsg{mtype: Close}
 	req := <-c.closeReturnChan
+	close(c.returnMain)
 	return req.err
 }
 
+// Routine handles sending and recieving messages
+// manages the internal data structures
+// manages the timers and the logic that come with them
 func (c *client) main() {
 	for {
-
-		if (c.state == Lost && c.pendingRead.Empty() && c.unProcData.Empty() && c.toBeRead == nil) || (c.state == Closing) {
+		// If read error condition is met, set c.toBeRead to have a
+		// nil msg field which will cause Read to return an error
+		if c.readErrCond() {
 			c.toBeRead = &internalMsg{mtype: Read, msg: nil}
 		}
 
+		// readActiveChan is a nil channel which gets set to
+		// readReturnChan when a message is available for reading
 		var readActiveChan chan *internalMsg
 		if c.toBeRead != nil {
-			cLog(c, fmt.Sprintf("[state]: %d\n", c.state), 1)
 			cLog(c, "[readActiveChan] activated", 1)
 			cLog(c, fmt.Sprintf("[#PendingRead]: %d\n", c.pendingRead.Size()), 1)
 			readActiveChan = c.readReturnChan
 		}
 
 		select {
+
 		case <-c.returnMain:
+			// This channel becomes active when main has to return
 			cLog(c, "[returnMain]", 1)
 			return
 
-		case msg := <-c.newMsgSendChan:
-
-			cLog(c, "[newMsgSendChan]", 1)
-			switch msg.Type {
-			case MsgConnect:
-				cLog(c, "[Connect]", 1)
-				success := processSendConnect(c, msg)
-				if success {
-					cLog(c, fmt.Sprintln("Sent to server", msg.ConnID, msg.Size), 1)
-				} else {
-					cLog(c, fmt.Sprintln("Failed to send"), 1)
-				}
-			case MsgData:
-				cLog(c, fmt.Sprintf("[Data]: %d\n", msg.SeqNum), 1)
-				processSendData(c, msg)
-			}
+		case msg := <-c.newConnectSendChan:
+			// This channel gets the initial NewConnect message
+			// from NewClient which it sends to server
+			// see handleConnet for how the client state is initialized
+			success := handleConnect(c, msg)
+			cLog(c, fmt.Sprintf("[Connect] %d, Sent?:%v\n", msg.ConnID, success), 2)
 
 		case msg := <-c.msgRecvChan:
-
-			cLog(c, "[msgRecvChan]", 1)
+			// This channel recieves messages forwarded by the Reader routine
+			// see comments for each MsgType handler for more details
+			cLog(c, "[msgRecvChan]", 2)
 			switch msg.Type {
+
 			case MsgData:
-				cLog(c, fmt.Sprintf("[Data]: %d\n", msg.SeqNum), 1)
+				cLog(c, fmt.Sprintf("[Data]: %d\n", msg.SeqNum), 2)
 				processRecvData(c, msg)
+
 			case MsgAck:
-				cLog(c, fmt.Sprintf("[Ack]: %d\n", msg.SeqNum), 1)
+				cLog(c, fmt.Sprintf("[Ack]: %d\n", msg.SeqNum), 2)
 				processRecvAcks(c, msg)
+
 			case MsgCAck:
-				cLog(c, fmt.Sprintf("[CAck]: %d\n", msg.SeqNum), 1)
+				// simulate the server recieving a series of acks
+				cLog(c, fmt.Sprintf("[CAck]: %d\n", msg.SeqNum), 2)
 				lower := c.unAckedMsgs.LB
 				for i := lower; i <= msg.SeqNum; i++ {
 					ack := NewAck(c.connID, i)
 					processRecvAcks(c, ack)
 				}
-
 			}
 
 		case req := <-c.processInternal:
+			// This channel handles the processing of ConnID, Write and Close calls
 			cLog(c, "[procInternal]", 1)
 			switch req.mtype {
+
 			case ID:
+				// Send the connID
 				c.connIDReturnChan <- &internalMsg{mtype: ID, id: c.connID}
 
 			case Write:
-
+				// If connection is closed || lost, immediately return an error
 				if c.state == Closing || c.state == Lost {
 					req.err = errors.New("client closed/lost")
 					c.writeReturnChan <- req
 				}
 
+				// If connection is active, validate the message in the write request
+				// Then, either send the data if within the bounds of the sliding window
+				// or put the message in pendingWrites to send later
 				if c.state == Active {
 					c.writeSeqNum++
 					validateWriteInternal(c, req)
 					sent := processSendData(c, req.msg)
-					if sent {
-						cLog(c, fmt.Sprintf("[Write proc'd] %d\n", req.msg.SeqNum), 2)
-					} else {
-						cLog(c, fmt.Sprintf("[Write pend'n] %d\n", req.msg.SeqNum), 2)
-					}
+					cLog(c, fmt.Sprintf("[Write]: %d, pending?: %v\n", req.msg.SeqNum, sent), 2)
 					cLog(c, fmt.Sprintf("[Swin state] %s\n", c.unAckedMsgs.String()), 3)
 					c.writeReturnChan <- req
 				}
 
 			case Close:
-
-				if c.state == Lost {
+				// If connection is lost || closed, immediately return an error
+				if c.state == Lost || c.state == Closing {
 					c.closeReturnChan <- &internalMsg{mtype: Close, err: nil}
 					return
 				}
+
+				// If error condition is met, stop timer, signal reader to return and return
 				c.state = Closing
-				if c.state == Closing && c.unAckedMsgs.Empty() && c.pendingWrite.Empty() {
+				if c.closeDoneCond() {
 					c.epochTimer.Stop()
 					close(c.returnReader)
 					c.closeReturnChan <- &internalMsg{mtype: Close, err: nil}
-					return
 				}
 			}
+
 		case readActiveChan <- c.toBeRead:
+			// This channel handles the processing of Read
 			processRead(c)
 
 		case <-c.epochTimer.C:
-
-			cLog(c, "[epFire]", 2)
+			// This channel handles processing during epoch fire's
+			// epochLimit counter is incremented, if it reaches EpochLimit
+			// the connection is deemed to be lost
+			// It is the responsibility of the message recievers to reset epLimitCounter
+			cLog(c, "[EpFire]", 1)
 			if c.state == Connect {
-				processReSendConnect(c)
+				processSendConnect(c)
 				c.epLimitCounter++
 			} else if c.state == Active || c.state == Closing {
-				processReSendDataOrHeartbeat(c)
+				processEpochFire(c)
 			}
 			c.epLimitCounter++
-
 			if c.epLimitCounter == c.params.EpochLimit {
 				cLog(c, "[EpochLimit]", 2)
 				processEpochLimit(c)
@@ -317,11 +330,12 @@ func (c *client) main() {
 	}
 }
 
+// Routine that listens for messages from server
 func (c *client) reader() {
 	for {
 		select {
 		case <-c.returnReader:
-			cLog(c, "returning: reader", 1)
+			cLog(c, "[returnReader]", 1)
 			return
 		default:
 			var msg Message

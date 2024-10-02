@@ -9,6 +9,8 @@ import (
 	"github.com/cmu440/lspnet"
 )
 
+// Internal messages struct for passing data
+// required for handling Read | ConnID | Write calls
 type internalMsg struct {
 	mtype InternalType
 	err   error
@@ -16,14 +18,24 @@ type internalMsg struct {
 	msg   *Message
 }
 
+// A logging helper function
 func cLog(c *client, str string, lvl int) {
 	if lvl <= c.logLvl {
 		log.Print(str)
 	}
 }
 
-// General Utility Helpers
+// condition for which read should return an error
+func (c *client) readErrCond() bool {
+	return (c.state == Lost && c.pendingRead.Empty() && c.unProcData.Empty() && c.toBeRead == nil) || (c.state == Closing)
+}
 
+// condition required for close to return
+func (c *client) closeDoneCond() bool {
+	return c.state == Closing && c.unAckedMsgs.Empty() && c.pendingWrite.Empty()
+}
+
+// function that sends a message to the server
 func sendToServer(conn *lspnet.UDPConn, msg *Message) bool {
 	byt, err := json.Marshal(msg)
 	if err == nil {
@@ -33,6 +45,7 @@ func sendToServer(conn *lspnet.UDPConn, msg *Message) bool {
 	return false
 }
 
+// function that recv's a message from the server
 func recvFromServer(conn *lspnet.UDPConn, msg *Message) error {
 	buf := make([]byte, 2000)
 	n, err := conn.Read(buf)
@@ -43,6 +56,7 @@ func recvFromServer(conn *lspnet.UDPConn, msg *Message) error {
 	return err
 }
 
+// function that checks for both valid data size and checksum
 func checkIntegrity(msg *Message) bool {
 	if len(msg.Payload) < msg.Size {
 		return false
@@ -52,6 +66,7 @@ func checkIntegrity(msg *Message) bool {
 	return msg.Checksum == checksum
 }
 
+// function that inits client state after a connection has been established
 func initClientAfterConnect(c *client, msg *Message) {
 	c.connID = msg.ConnID
 	c.state = Active
@@ -64,7 +79,7 @@ func initClientAfterConnect(c *client, msg *Message) {
 	c.returnNewClient <- 1
 }
 
-// Assigns a ConnID, SeqNum, Checksum to a message sent my write request
+// function that assigns a ConnID, SeqNum, Checksum to a message within a write request
 func validateWriteInternal(c *client, req *internalMsg) {
 	if c.state == Lost || c.state == Closing {
 		req.err = errors.New("Server connection lost")
@@ -76,15 +91,16 @@ func validateWriteInternal(c *client, req *internalMsg) {
 	req.err = nil
 }
 
+// function that returns all go routines
+// used by NewClient if connection cant be established
 func returnAll(c *client) {
 	c.returnMain <- 1
 	c.returnReader <- 1
 }
 
-// Message Sending
-
-// Sent a NewConnect Message
-func processSendConnect(c *client, msg *Message) bool {
+// function that sends a initializes the SlidingWindow data structure
+// during the connect state and puts a NewConnect message in.
+func handleConnect(c *client, msg *Message) bool {
 	sent := false
 	if !(c.state == Connect) {
 		return sent
@@ -98,15 +114,17 @@ func processSendConnect(c *client, msg *Message) bool {
 	return sent
 }
 
-// Resend NewConnect to server
-func processReSendConnect(c *client) bool {
+// function that sends a NewConnect to server
+func processSendConnect(c *client) bool {
 	msg := NewConnect(c.writeSeqNum)
 	sent := sendToServer(c.clientConn, msg)
 	return sent
 }
 
-// Attempt to put in sliding window,
-// If valid, send, else put in pendingWrite
+// function that handles sending a data msg to the server
+// first an attempt is made to Put a msg into sliding window
+// if within bounds, send to server
+// else put in pending pq for processing later
 func processSendData(c *client, msg *Message) bool {
 	sent := false
 	if !(c.state == Active) || (c.state == Closing) {
@@ -126,9 +144,11 @@ func processSendData(c *client, msg *Message) bool {
 	return sent
 }
 
-// Update backoffs and get a priority queue of messages to be send
-// if priority queue is empty, send heartbeat instead
-func processReSendDataOrHeartbeat(c *client) bool {
+// function that processess epoch fires during the Active or Closing state
+// updates backoffs of all the messages in unAckedMsgs
+// if there are messages to be sent based on their currBackoff, send
+// else send heartbeat instead
+func processEpochFire(c *client) bool {
 	isheartbeat := false
 	if !(c.state == Active || c.state == Closing) {
 		return isheartbeat
@@ -148,7 +168,7 @@ func processReSendDataOrHeartbeat(c *client) bool {
 	return isheartbeat
 }
 
-// Just sent an ack to server
+// function that just sends an Ack to the server
 func processSendAcks(c *client, msg *Message) bool {
 	sent := false
 	if !(c.state == Active || c.state == Closing) {
@@ -161,12 +181,12 @@ func processSendAcks(c *client, msg *Message) bool {
 	return sent
 }
 
-// Message Receiving
-
-// Check data message's validity, and either
-// Mark as toBeRead for processing when read is called
-// Or put in pendingRead
-// Reset epochLimit
+// function that handles a recieved data message from the server
+// (1) if the message has integrity, attempt to put in unProcData
+// (2) if isValid, then Put was succesful => message is within window bounds
+// (3) if the message sn matches read sn, mark it as the one to be read next (c.toBeRead)
+// (2) else put in the pendingRead pq for processing later when the window shifts
+// reset epochLimit
 func processRecvData(c *client, msg *Message) {
 	if c.state != Active {
 		return
@@ -177,11 +197,7 @@ func processRecvData(c *client, msg *Message) {
 		if isValid && msg.SeqNum == c.readSeqNum {
 			if msg.SeqNum == c.readSeqNum {
 				cLog(c, fmt.Sprintf("[toBeRead]: %d\n", msg.SeqNum), 2)
-				var err error
-				if c.state == Closing || (c.state == Lost && c.pendingRead.Empty()) {
-					err = errors.New("client closed or conn lost")
-				}
-				c.toBeRead = &internalMsg{mtype: Read, msg: msg, err: err}
+				c.toBeRead = &internalMsg{mtype: Read, msg: msg, err: nil}
 			} else {
 				cLog(c, fmt.Sprintf("[pendingRead]: %d\n", msg.SeqNum), 2)
 			}
@@ -198,10 +214,12 @@ func processRecvData(c *client, msg *Message) {
 	c.epLimitCounter = 0
 }
 
-// Connect : If valid ack for connect, init sliding window, signal NewClient to return
-// Active  : If ack matches seqNum in sliding window => data has been recvd, remove from window
-// Attempt to put the lowest priority item in pendingWrite into the sliding window
-// Reset epochLimit
+// function that handles a recieved ack message from the server
+// connect state: If valid ack for connect, init post-connect client state & signal NewClient to return
+// of close condition met: stop timer, signal reader to return and signal close to return for cleanup
+// other : If ack matches seqNum in sliding window => that data has been recv'd, remove from window
+// if remove successful => bounds may have changed,  so attempt to put to as many items in the pendingWrite pq as possible
+// reset epochLimit
 func processRecvAcks(c *client, msg *Message) {
 	if c.state == Connect {
 		if msg.ConnID != 0 {
@@ -210,7 +228,12 @@ func processRecvAcks(c *client, msg *Message) {
 				initClientAfterConnect(c, msg)
 			}
 		}
+	} else if c.closeDoneCond() {
+		c.epochTimer.Stop()
+		close(c.returnReader)
+		c.closeReturnChan <- &internalMsg{mtype: Close, err: nil}
 	} else {
+
 		if msg.SeqNum == 0 {
 			cLog(c, "[HEARTBEAT: server]", 2)
 		}
@@ -230,17 +253,16 @@ func processRecvAcks(c *client, msg *Message) {
 				cLog(c, fmt.Sprintf("[pendingWrite]: %d\n", pqmsg.SeqNum), 2)
 			}
 		}
-
-		if c.state == Closing && c.unAckedMsgs.Empty() && c.pendingWrite.Empty() {
-			c.closeReturnChan <- &internalMsg{mtype: Close, err: nil}
-		}
 	}
 	cLog(c, "EpochLimit reset", 3)
 	c.epLimitCounter = 0
 }
 
-// Function Handling
-
+// function that queues up the next message to be processed by read if available
+// if c.toBeRead == nil, no pending message is available currently for processing, return
+// c.toBeRead has just been read, remove from sliding window if it exists in there
+// The sliding window bounds may have changed so attempt to put as many msgs pendingRead as possible
+// Set the next c.toBeRead if it exists
 func processRead(c *client) {
 	if c.state == Active || (c.state == Lost && c.toBeRead != nil) {
 		if c.toBeRead.msg == nil {
@@ -273,6 +295,9 @@ func processRead(c *client) {
 	}
 }
 
+// function that handles client state when epoch limit is reached
+// during connect: signal NewClient to return an error
+// during other: connection has been lost, stop timer, signal reader to return
 func processEpochLimit(c *client) {
 	if c.state == Connect {
 		c.connFailed <- 1

@@ -119,11 +119,11 @@ func (m *sWindowMap) GetMinMsg() (*Message, bool) {
 
 // update the backoffs of the unAcked messages
 func (m *sWindowMap) UpdateBackoffs(maxBackoff int) (*priorityQueue, bool) {
-	pq := NewPQ()
-
 	if m.Empty() {
-		return pq, false
+		return nil, false
 	}
+
+	pq := NewPQ()
 
 	for _, v := range m.mp {
 		// update counter,
@@ -143,7 +143,7 @@ func (m *sWindowMap) UpdateBackoffs(maxBackoff int) (*priorityQueue, bool) {
 	}
 
 	if pq.Empty() {
-		return pq, false
+		return nil, false
 	}
 
 	return pq, true
