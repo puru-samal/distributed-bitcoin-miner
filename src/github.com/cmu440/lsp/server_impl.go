@@ -249,7 +249,7 @@ func (s *server) serverMain() {
 				size := client.pendingMsgs.Size()
 				for size > 0 {
 					msg, _ := client.pendingMsgs.RemoveMin()
-					if client.isValidMessage(msg.SeqNum) || client.unAckedMsgs.Empty() {
+					if client.IsValidMessage(msg.SeqNum) || client.unAckedMsgs.Empty() {
 						err := s.sendMessage(msg, client.addr)
 						if err != nil {
 							log.Println(err)
