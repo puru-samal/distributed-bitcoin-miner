@@ -101,22 +101,6 @@ func (m *sWindowMap) In(key int) bool {
 	return exist
 }
 
-// get the message with the minimum sequence number
-func (m *sWindowMap) GetMinMsg() (*Message, bool) {
-
-	if m.Empty() {
-		return nil, false
-	}
-
-	minKey := m.UB
-	for k := range m.mp {
-		if minKey > k {
-			minKey = k
-		}
-	}
-	return m.mp[minKey].msg, true
-}
-
 // update the backoffs of the unAcked messages
 func (m *sWindowMap) UpdateBackoffs(maxBackoff int) (*priorityQueue, bool) {
 	if m.Empty() {
