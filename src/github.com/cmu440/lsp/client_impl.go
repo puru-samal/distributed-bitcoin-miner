@@ -317,7 +317,6 @@ func (c *client) main() {
 			cLog(c, "[EpFire]", 1)
 			if c.state == Connect {
 				processSendConnect(c)
-				c.epLimitCounter++
 			} else if c.state == Active || c.state == Closing {
 				processEpochFire(c)
 			}
