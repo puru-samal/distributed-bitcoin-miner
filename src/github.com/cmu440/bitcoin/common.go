@@ -2,6 +2,7 @@ package bitcoin
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"time"
 
@@ -18,14 +19,13 @@ type Chunk struct {
 // A job is essentially a collection of chunks
 type Job struct {
 	server        lsp.Server
-	clientID      int            // client connID that submitted the request
-	data          string         // the data sent in a request
-	maxNonce      uint64         // notion of size
-	startTime     time.Time      // update with time.Now() when a client request is recv'd
-	minHash       uint64         // the current min hash
-	minNonce      uint64         // the current minNonce
-	pendingChunks *ChunkQ        // queue of pending chunks
-	minerMap      map[int]*Chunk // map of minerID -> *Chunk
+	clientID      int       // client connID that submitted the request
+	data          string    // the data sent in a request
+	maxNonce      uint64    // notion of size
+	startTime     time.Time // update with time.Now() when a client request is recv'd
+	minHash       uint64    // the current min hash
+	minNonce      uint64    // the current minNonce
+	pendingChunks *ChunkQ   // queue of pending chunks
 }
 
 // creates a new job upon getting a client request
@@ -41,7 +41,6 @@ func NewJob(server lsp.Server, clientID int, data string, clientRequest *Message
 		minHash:       math.MaxUint64,
 		minNonce:      math.MaxUint64,
 		pendingChunks: &ChunkQ{},
-		minerMap:      make(map[int]*Chunk),
 	}
 
 	for i := uint64(0); i < job.maxNonce; i += chunkSize {
@@ -68,7 +67,6 @@ func (job *Job) AssignToMiner(minerID int) bool {
 		return false
 	}
 
-	job.minerMap[minerID] = chunk
 	payload, _ := json.Marshal(chunk.request)
 	job.server.Write(minerID, payload)
 	return true
@@ -78,13 +76,9 @@ func (job *Job) AssignToMiner(minerID int) bool {
 // and then removes the chunk from the minerMap
 // server should immediately check if a job is compete, if yes then send result to client
 func (job *Job) ProcessResult(minerID int, minerResult *Message) {
-	_, exist := job.minerMap[minerID]
-	if exist {
-		if job.minHash > minerResult.Hash {
-			job.minHash = minerResult.Hash
-			job.minNonce = minerResult.Nonce
-		}
-		delete(job.minerMap, minerID)
+	if job.minHash > minerResult.Hash {
+		job.minHash = minerResult.Hash
+		job.minNonce = minerResult.Nonce
 	}
 }
 
@@ -96,35 +90,39 @@ func (job *Job) ProcessComplete() {
 
 // condition for when a job is considered to be complete
 func (job *Job) Complete() bool {
-	return len(job.minerMap) == 0 && job.pendingChunks.Empty()
+	return job.pendingChunks.Empty()
 }
 
 // Miner  ______________________________________________________________________________
 type Miner struct {
 	minerID      int // miner connID that joined the server
-	currclientID int // current job worker is assigned to. Note: Miner is only processing a chunk.
+	currClientID int // current job worker is assigned to. Note: Miner is only processing a chunk.
 }
 
 func NewMiner(minerID int) *Miner {
 	worker := &Miner{
 		minerID:      minerID,
-		currclientID: -1,
+		currClientID: -1,
 	}
 	return worker
 }
 
 func (w *Miner) Busy() bool {
-	return w.currclientID != -1
+	return w.currClientID != -1
 }
 
 // Scheduler Interface  _________________________________________________________________
 // A generic scheduler interface for load balancing algorithms.
 type Scheduler interface {
 	AddMiner(minerID int)
+	IsMiner(id int) bool
+	MinerDone(minerID int)
 	RemoveMiner(minerID int)
+	GetMinersJob(minerID int) (*Job, int, bool)
 	AddJob(job *Job)
 	RemoveJob(clientID int)
-	ScheduleJobs()
+	GetJob(clientID int) (*Job, bool)
+	ScheduleJobs() bool
 }
 
 // FCFS Scheduler  ______________________________________________________________________
@@ -132,64 +130,87 @@ type Scheduler interface {
 // they are recieved
 type FCFS struct {
 	server lsp.Server
-	miners []*Miner
-	jobs   []*Job
+	miners map[int]*Miner
+	jobs   map[int]*Job
 }
 
 // initialize
 func NewFCFS(srv lsp.Server) *FCFS {
 	return &FCFS{
 		server: srv,
-		miners: make([]*Miner, 0),
-		jobs:   make([]*Job, 0),
+		miners: make(map[int]*Miner),
+		jobs:   make(map[int]*Job),
 	}
 }
 
 // add a new miner when a join message is recieved
 func (fcfs *FCFS) AddMiner(minerID int) {
 	miner := NewMiner(minerID)
-	fcfs.miners = append(fcfs.miners, miner)
+	fcfs.miners[minerID] = miner
+}
+
+func (fcfs *FCFS) IsMiner(id int) bool {
+	_, minerExist := fcfs.miners[id]
+	return minerExist
+}
+
+func (fcfs *FCFS) MinerDone(minerID int) {
+	fcfs.miners[minerID].currClientID = -1
 }
 
 // remove a miner when a miner is disconnected
 func (fcfs *FCFS) RemoveMiner(minerID int) {
-	for i, miner := range fcfs.miners {
-		if miner.minerID == minerID {
-			fcfs.miners = append(fcfs.miners[:i], fcfs.miners[i+1:]...)
-			break
-		}
-	}
+	delete(fcfs.miners, minerID)
+}
+
+func (fcfs *FCFS) GetMinersJob(minerID int) (*Job, int, bool) {
+	miner := fcfs.miners[minerID]
+	job, exist := fcfs.GetJob(miner.currClientID)
+	return job, job.clientID, exist
 }
 
 // add a job to the job list when a client request is recv'd
 func (fcfs *FCFS) AddJob(job *Job) {
-	fcfs.jobs = append(fcfs.jobs, job)
+	fcfs.jobs[job.clientID] = job
+}
+
+func (fcfs *FCFS) GetJob(clientID int) (*Job, bool) {
+	job, exist := fcfs.jobs[clientID]
+	return job, exist
 }
 
 // remove a job from the job list when a job is complete
 func (fcfs *FCFS) RemoveJob(clientID int) {
-	for i, job := range fcfs.jobs {
-		if job.clientID == clientID {
-			fcfs.jobs = append(fcfs.jobs[:i], fcfs.jobs[i+1:]...)
-			break
-		}
-	}
+	delete(fcfs.jobs, clientID)
 }
 
-// fcfs scheduler
-func (fcfs *FCFS) ScheduleJobs() {
+// fcfs scheduler, false means nothing was scheduled
+func (fcfs *FCFS) ScheduleJobs() bool {
 	if len(fcfs.jobs) == 0 {
-		return
+		return false
 	}
-	jobIdx := 0
+
+	// earliest job
+	jobQ := NewPQ()
+	for _, job := range fcfs.jobs {
+		jobQ.Insert(job)
+	}
+
+	currJob, _ := jobQ.RemoveMin()
+
 	for _, miner := range fcfs.miners {
 		if !miner.Busy() {
-			exist := fcfs.jobs[jobIdx].AssignToMiner(miner.minerID)
+			exist := currJob.AssignToMiner(miner.minerID)
 			if !exist {
-				jobIdx++
+				newJob, err := jobQ.RemoveMin()
+				if err != nil {
+					return true
+				}
+				currJob = newJob
 			}
 		}
 	}
+	return true
 }
 
 // RunningStats  ________________________________________________________________________
@@ -278,4 +299,129 @@ func (q *ChunkQ) Size() int {
 
 func (q *ChunkQ) Empty() bool {
 	return len(q.chunks) == 0
+}
+
+// Time-Based PQ  _______________________________________________________________________
+// list of messages inside the priority queue
+type jobTimeQ struct {
+	q []*Job
+}
+
+/** API **/
+
+// create a new priority queue
+func NewPQ() *jobTimeQ {
+	newQueue := &jobTimeQ{
+		q: make([]*Job, 0),
+	}
+	return newQueue
+}
+
+// insert a new message into the priority queue
+// and maintain the min heap property
+func (pq *jobTimeQ) Insert(elem *Job) {
+	pq.q = append(pq.q, elem)
+	pq.minHeapifyUp(len(pq.q) - 1)
+}
+
+// get the message with the minimum sequence number
+// if the priority queue is empty, return an error
+func (pq *jobTimeQ) GetMin() (*Job, error) {
+	if len(pq.q) == 0 {
+		return nil, fmt.Errorf("priority queue is empty")
+	}
+
+	return pq.q[0], nil
+}
+
+// remove the message with the minimum sequence number
+// and maintain the minheap property
+func (pq *jobTimeQ) RemoveMin() (*Job, error) {
+	min, err := pq.GetMin()
+
+	if err != nil {
+		return nil, err
+	}
+
+	pq.q[0] = pq.q[len(pq.q)-1]
+	pq.q = pq.q[:len(pq.q)-1]
+	pq.minHeapifyDown(0)
+	return min, nil
+}
+
+// check if the priority queue is empty
+func (pq *jobTimeQ) Empty() bool {
+	return len(pq.q) == 0
+}
+
+// return the size of the priority queue
+func (pq *jobTimeQ) Size() int {
+	return len(pq.q)
+}
+
+/** internal helpers **/
+
+// check if the index is valid in the priority queue
+func (pq *jobTimeQ) isValidIdx(idx int) bool {
+	return (0 <= idx) && (idx < len(pq.q))
+}
+
+// get the parent of the current index
+func (pq *jobTimeQ) parent(idx int) int {
+	newIdx := (idx - 1) >> 1
+	return newIdx
+}
+
+// get the left child of the current index
+func (pq *jobTimeQ) leftChild(idx int) int {
+	newIdx := (idx << 1) + 1
+	return newIdx
+}
+
+// get the right child of the current index
+func (pq *jobTimeQ) rightChild(idx int) int {
+	newIdx := (idx << 1) + 2
+	return newIdx
+}
+
+// maintain the min heap property by moving the element down
+// used when removing the minimum element
+func (pq *jobTimeQ) minHeapifyDown(idx int) {
+	if !pq.isValidIdx(idx) {
+		return
+	}
+	lch := pq.leftChild(idx)
+	rch := pq.rightChild(idx)
+	minIdx := idx
+	if pq.isValidIdx(lch) && pq.q[minIdx].startTime.Compare(pq.q[lch].startTime) == 1 {
+		minIdx = lch
+	}
+	if pq.isValidIdx(rch) && pq.q[minIdx].startTime.Compare(pq.q[rch].startTime) == 1 {
+		minIdx = rch
+	}
+	if minIdx != idx {
+		tmp := pq.q[idx]
+		pq.q[idx] = pq.q[minIdx]
+		pq.q[minIdx] = tmp
+		pq.minHeapifyDown(minIdx)
+	}
+}
+
+// maintain the min heap property by moving the element up
+// used when inserting a new element
+func (pq *jobTimeQ) minHeapifyUp(idx int) {
+	if !pq.isValidIdx(idx) {
+		return
+	}
+	p := pq.parent(idx)
+	maxIdx := idx
+	if pq.isValidIdx(p) && pq.q[maxIdx].startTime.Compare(pq.q[p].startTime) == -1 {
+		maxIdx = p
+	}
+	if maxIdx != idx {
+		tmp := pq.q[idx]
+		pq.q[idx] = pq.q[maxIdx]
+		pq.q[maxIdx] = tmp
+		pq.minHeapifyUp(maxIdx)
+	}
 }

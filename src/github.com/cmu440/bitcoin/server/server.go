@@ -11,98 +11,15 @@ import (
 	"github.com/cmu440/lsp"
 )
 
-// priorityQueue
-type priorityQueue struct {
-	q []*info
-}
-
-func newPQ() *priorityQueue {
-	newQueue := &priorityQueue{
-		q: make([]*info, 0),
-	}
-	return newQueue
-}
-
-func (pq *priorityQueue) insert(elem *info) {
-	pq.q = append(pq.q, elem)
-	pq.minHeapifyUp(len(pq.q) - 1)
-}
-
-func (pq *priorityQueue) getMin() (*info, error) {
-	if len(pq.q) == 0 {
-		return nil, fmt.Errorf("priority queue is empty")
-	}
-	return pq.q[0], nil
-}
-
-func (pq *priorityQueue) removeMin() (*info, error) {
-	min, err := pq.getMin()
-	if err != nil {
-		return nil, err
-	}
-	pq.q[0] = pq.q[len(pq.q)-1]
-	pq.q = pq.q[:len(pq.q)-1]
-	pq.minHeapifyDown(0)
-	return min, nil
-}
-
-func (pq *priorityQueue) empty() bool {
-	return len(pq.q) == 0
-}
-
-func (pq *priorityQueue) size() int {
-	return len(pq.q)
-}
-
-func (pq *priorityQueue) minHeapifyUp(i int) {
-	for i > 0 {
-		parent := (i - 1) / 2
-		if pq.q[parent].message.Nonce > pq.q[i].message.Nonce {
-			pq.q[parent], pq.q[i] = pq.q[i], pq.q[parent]
-			i = parent
-		} else {
-			break
-		}
-	}
-}
-
-func (pq *priorityQueue) minHeapifyDown(i int) {
-	for {
-		left := 2*i + 1
-		right := 2*i + 2
-		smallest := i
-		if left < len(pq.q) && pq.q[left].message.Nonce < pq.q[smallest].message.Nonce {
-			smallest = left
-		}
-		if right < len(pq.q) && pq.q[right].message.Nonce < pq.q[smallest].message.Nonce {
-			smallest = right
-		}
-		if smallest != i {
-			pq.q[i], pq.q[smallest] = pq.q[smallest], pq.q[i]
-			i = smallest
-		} else {
-			break
-		}
-	}
-}
-
-func (pq *priorityQueue) remove(elem *info) {
-	for i, e := range pq.q {
-		if e == elem {
-
-			break
-		}
-	}
-}
-
 // server
 type server struct {
-	lspServer      lsp.Server
-	clientMap      map[int]*info // clientID -> info
-	requestQueue   *priorityQueue
-	idleMiner      []int
-	connectedMiner []int
-	executingTasks map[int]*task // minerID -> task
+	lspServer lsp.Server
+	// clientMap      map[int]*info // clientID -> info
+	// idleMiner      []int
+	// connectedMiner []int
+	// executingTasks map[int]*task // minerID -> task
+	rStats    bitcoin.RunningStats
+	scheduler bitcoin.Scheduler
 
 	// Channel
 	configureChan chan *config
@@ -137,12 +54,13 @@ func startServer(port int) (*server, error) {
 		return nil, err
 	}
 	server := &server{
-		lspServer:      lspServer,
-		clientMap:      make(map[int]*info),
-		requestQueue:   newPQ(),
-		idleMiner:      make([]int, 0),
-		connectedMiner: make([]int, 0),
-		executingTasks: make(map[int]*task),
+		lspServer: lspServer,
+		// clientMap:      make(map[int]*info),
+		// idleMiner:      make([]int, 0),
+		// connectedMiner: make([]int, 0),
+		// executingTasks: make(map[int]*task),
+		rStats:    bitcoin.RunningStats{},
+		scheduler: bitcoin.NewFCFS(lspServer),
 	}
 	return server, nil
 }
@@ -190,7 +108,7 @@ func main() {
 	// TODO: implement this!
 	go srv.reader()
 	go srv.processor()
-	go srv.distributor()
+	// go srv.distributor()
 }
 
 func (srv *server) reader() {
@@ -222,22 +140,49 @@ func (srv *server) processor() {
 		select {
 		case config := <-srv.configureChan:
 			if config.disconnected {
-				srv.handleDisconnected(config.connID)
+				isMiner := srv.scheduler.IsMiner(config.connID)
+				if isMiner {
+					srv.scheduler.RemoveMiner(config.connID)
+				} else {
+					srv.scheduler.RemoveJob(config.connID)
+				}
+				//srv.handleDisconnected(config.connID)
 			}
 			if config.message.Type == bitcoin.Join {
-				srv.handleMinerJoin(config.connID)
+				srv.scheduler.AddMiner(config.connID)
+				srv.scheduler.ScheduleJobs()
+				//srv.handleMinerJoin(config.connID)
 			} else if config.message.Type == bitcoin.Request {
-				srv.handleClientRequest(config.connID, config.message)
+				srv.rStats.StartRecording(config.connID)
+				job := bitcoin.NewJob(srv.lspServer, config.connID, config.message.Data, config.message, 10000)
+				srv.scheduler.AddJob(job)
+				srv.scheduler.ScheduleJobs()
+				//srv.handleClientRequest(config.connID, config.message)
 			} else if config.message.Type == bitcoin.Result {
-				srv.handleResult(config.connID)
+				minerID := config.connID
+				//clientID := miner.currClientID
+
+				job, clientID, _ := srv.scheduler.GetMinersJob(minerID)
+				job.ProcessResult(minerID, config.message)
+
+				// send result back to cliet
+				if job.Complete() {
+					srv.rStats.StopRecording(clientID)
+					job.ProcessComplete()
+					srv.scheduler.RemoveJob(clientID)
+				}
+				srv.scheduler.ScheduleJobs()
+				//srv.handleResult(config.connID)
 			}
 		}
 	}
 }
 
+/*
 func (srv *server) distributor() {
 
 }
+
 
 func (srv *server) handleClientRequest(connID int, message *bitcoin.Message) {
 	// need to divide the request into chunks
@@ -292,3 +237,4 @@ func (srv *server) handleResult(connID int, message *bitcoin.Message) {
 }
 
 func (srv *server) handleDisconnected(connID int) {}
+*/
