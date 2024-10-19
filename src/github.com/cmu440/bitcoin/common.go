@@ -19,13 +19,14 @@ type Chunk struct {
 // A job is essentially a collection of chunks
 type Job struct {
 	server        lsp.Server
-	clientID      int       // client connID that submitted the request
-	data          string    // the data sent in a request
-	maxNonce      uint64    // notion of size
-	startTime     time.Time // update with time.Now() when a client request is recv'd
-	minHash       uint64    // the current min hash
-	minNonce      uint64    // the current minNonce
-	pendingChunks *ChunkQ   // queue of pending chunks
+	clientID      int            // client connID that submitted the request
+	data          string         // the data sent in a request
+	maxNonce      uint64         // notion of size
+	startTime     time.Time      // update with time.Now() when a client request is recv'd
+	minHash       uint64         // the current min hash
+	minNonce      uint64         // the current minNonce
+	pendingChunks *ChunkQ        // queue of pending chunks
+	minerMap      map[int]*Chunk // map of minerID -> *Chunk
 }
 
 // creates a new job upon getting a client request
@@ -41,9 +42,11 @@ func NewJob(server lsp.Server, clientID int, data string, clientRequest *Message
 		minHash:       math.MaxUint64,
 		minNonce:      math.MaxUint64,
 		pendingChunks: &ChunkQ{},
+		minerMap:      make(map[int]*Chunk),
 	}
 
 	for i := uint64(0); i < job.maxNonce; i += chunkSize {
+		// inclusive lower and upper bounds
 		lower := i
 		upper := i + chunkSize - 1
 		if upper > job.maxNonce {
@@ -66,7 +69,7 @@ func (job *Job) AssignToMiner(minerID int) bool {
 	if !exist {
 		return false
 	}
-
+	job.minerMap[minerID] = chunk
 	payload, _ := json.Marshal(chunk.request)
 	job.server.Write(minerID, payload)
 	return true
@@ -160,6 +163,13 @@ func (fcfs *FCFS) MinerDone(minerID int) {
 
 // remove a miner when a miner is disconnected
 func (fcfs *FCFS) RemoveMiner(minerID int) {
+	miner := fcfs.miners[minerID]
+	if miner.Busy() {
+		job, _ := fcfs.GetJob(miner.currClientID)
+		chunk := job.minerMap[minerID]
+		// re-enqueue the chunk; do we need to remove it from the pendingChunks?
+		job.pendingChunks.Enqueue(chunk)
+	}
 	delete(fcfs.miners, minerID)
 }
 

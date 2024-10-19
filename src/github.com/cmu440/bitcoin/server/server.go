@@ -163,6 +163,7 @@ func (srv *server) processor() {
 				//clientID := miner.currClientID
 
 				job, clientID, _ := srv.scheduler.GetMinersJob(minerID)
+				srv.scheduler.MinerDone(minerID)
 				job.ProcessResult(minerID, config.message)
 
 				// send result back to cliet
