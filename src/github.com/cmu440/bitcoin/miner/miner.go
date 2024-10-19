@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/cmu440/bitcoin"
 	"github.com/cmu440/lsp"
 )
 
@@ -17,9 +19,17 @@ func joinWithServer(hostport string) (lsp.Client, error) {
 	seed := rand.NewSource(time.Now().UnixNano())
 	isn := rand.New(seed).Intn(int(math.Pow(2, 8)))
 
-	// TODO: implement this!
+	// Create a New Client
+	client, err := lsp.NewClient(hostport, isn, lsp.NewParams())
+	if err != nil {
+		return client, err
+	}
 
-	return nil, nil
+	// Send join request
+	request := bitcoin.NewJoin()
+	payload, _ := json.Marshal(request)
+	client.Write(payload)
+	return client, err
 }
 
 var LOGF *log.Logger
@@ -38,6 +48,8 @@ func main() {
 	}
 	defer file.Close()
 
+	LOGF := log.New(file, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
+
 	const numArgs = 2
 	if len(os.Args) != numArgs {
 		fmt.Printf("Usage: ./%s <hostport>", os.Args[0])
@@ -47,11 +59,16 @@ func main() {
 	hostport := os.Args[1]
 	miner, err := joinWithServer(hostport)
 	if err != nil {
+		LOGF.Printf("[Miner[id %d] Join Fail]\n", miner.ConnID())
 		fmt.Println("Failed to join with server:", err)
 		return
 	}
 
+	LOGF.Printf("[Miner[id %d] Joined]\n", miner.ConnID())
+
 	defer miner.Close()
 
 	// TODO: implement this!
+	bitcoin.ProcessMiner(miner, LOGF)
+
 }

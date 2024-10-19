@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/cmu440/bitcoin"
 	"github.com/cmu440/lsp"
 )
 
@@ -28,6 +30,8 @@ func main() {
 	}
 	defer file.Close()
 
+	LOGF := log.New(file, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
+
 	const numArgs = 4
 	if len(os.Args) != numArgs {
 		fmt.Printf("Usage: ./%s <hostport> <message> <maxNonce>", os.Args[0])
@@ -45,17 +49,35 @@ func main() {
 
 	client, err := lsp.NewClient(hostport, isn, lsp.NewParams())
 	if err != nil {
+		LOGF.Printf("[Client[id %d] Connection Failed]\n", client.ConnID())
 		fmt.Println("Failed to connect to server:", err)
 		return
 	}
+	LOGF.Printf("[Client[id %d] Connected]\n", client.ConnID())
 
 	defer client.Close()
 
-	_ = message  // Keep compiler happy. Please remove!
-	_ = maxNonce // Keep compiler happy. Please remove!
 	// TODO: implement this!
 
-	printResult(0, 0)
+	// Create and send a new request
+	request := bitcoin.NewRequest(message, 0, maxNonce)
+	payload, _ := json.Marshal(request)
+	client.Write(payload)
+	LOGF.Printf("[Client[id %d] MsgSend]: %s\n", client.ConnID(), request.String())
+
+	// Block until result is recieved
+	result, err := client.Read()
+
+	// Print result/disonnect and exit
+	if err != nil {
+		LOGF.Printf("[Client[id %d] Disconnect]\n", client.ConnID())
+		printDisconnected()
+	} else {
+		var msg bitcoin.Message
+		json.Unmarshal(result, &msg)
+		LOGF.Printf("[Client[id %d] MsgRecv]: %s\n", client.ConnID(), msg.String())
+		printResult(msg.Hash, msg.Nonce)
+	}
 }
 
 // printResult prints the final result to stdout.
