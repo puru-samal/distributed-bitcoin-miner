@@ -1,22 +1,60 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"strconv"
 
+	"github.com/cmu440/bitcoin"
 	"github.com/cmu440/lsp"
 )
 
 type server struct {
-	lspServer lsp.Server
+	lspServer      lsp.Server
+	clientMap      map[int]*info
+	idleMiner      []int
+	connectedMiner []int
+	executingTasks map[int]*task
+
+	// Channels
+	clientRequestChan chan bool
+	minerJoinChan     chan bool
+	resultChan        chan int // return connID
+	disconnectedChan  chan int // return connID
+}
+
+type info struct {
+	connID       int
+	message      *bitcoin.Message
+	minHashValue uint64
+	minHashNonce uint64
+	numTaskLeft  int
+	taskQueue    []*task // task priority queue
+}
+
+type task struct {
+	connID int
+	start  uint64
+	end    uint64
 }
 
 func startServer(port int) (*server, error) {
 	// TODO: implement this!
-
-	return nil, nil
+	// start new server
+	lspServer, err := lsp.NewServer(port, lsp.NewParams())
+	if err != nil {
+		return nil, err
+	}
+	server := &server{
+		lspServer:      lspServer,
+		clientMap:      make(map[int]*info),
+		idleMiner:      make([]int, 0),
+		connectedMiner: make([]int, 0),
+		executingTasks: make(map[int]*task),
+	}
+	return server, nil
 }
 
 var LOGF *log.Logger
@@ -60,4 +98,59 @@ func main() {
 	defer srv.lspServer.Close()
 
 	// TODO: implement this!
+	go srv.reader()
+	go srv.processor()
 }
+
+func (srv *server) reader() {
+	for {
+		connID, payload, err := srv.lspServer.Read()
+		if err != nil {
+			srv.disconnectedChan <- connID
+		}
+		// handle different type of message
+		var message bitcoin.Message
+		err = json.Unmarshal(payload, &message)
+		if err != nil {
+			return
+		}
+		switch message.Type {
+		case bitcoin.Join:
+			// handle join message
+			srv.minerJoinChan <- true
+		case bitcoin.Request:
+			// handle request message
+			srv.clientRequestChan <- true
+		case bitcoin.Result:
+			// handle result message
+			srv.resultChan <- connID
+		}
+	}
+}
+
+func (srv *server) processor() {
+	for {
+		select {
+		case <-srv.clientRequestChan:
+			// handle client request
+			srv.handleClientRequest()
+		case <-srv.minerJoinChan:
+			// handle miner join
+			srv.handleMinerJoin()
+		case connID := <-srv.resultChan:
+			// handle result
+			srv.handleResult(connID)
+		case connID := <-srv.disconnectedChan:
+			// handle disconnected
+			srv.handleDisconnected(connID)
+		}
+	}
+}
+
+func (srv *server) handleClientRequest() {}
+
+func (srv *server) handleMinerJoin() {}
+
+func (srv *server) handleResult(connID int) {}
+
+func (srv *server) handleDisconnected(connID int) {}
