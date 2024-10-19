@@ -72,10 +72,15 @@ func main() {
 	if err != nil {
 		LOGF.Printf("[Client[id %d] Disconnect]\n", client.ConnID())
 		printDisconnected()
+		return
 	} else {
 		var msg bitcoin.Message
-		json.Unmarshal(result, &msg)
+		error := json.Unmarshal(result, &msg)
 		LOGF.Printf("[Client[id %d] MsgRecv]: %s\n", client.ConnID(), msg.String())
+		// error when unmarshalling
+		if error != nil {
+			return
+		}
 		printResult(msg.Hash, msg.Nonce)
 	}
 }

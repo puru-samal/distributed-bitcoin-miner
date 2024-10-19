@@ -70,8 +70,17 @@ func (job *Job) AssignToMiner(minerID int) bool {
 		return false
 	}
 	job.minerMap[minerID] = chunk
-	payload, _ := json.Marshal(chunk.request)
-	job.server.Write(minerID, payload)
+	payload, err := json.Marshal(chunk.request)
+	if err != nil {
+		return false
+	}
+	error := job.server.Write(minerID, payload)
+	// miner is lost - channel or RemoveMiner?
+	if error != nil {
+
+		return false
+	}
+
 	return true
 }
 
@@ -87,8 +96,16 @@ func (job *Job) ProcessResult(minerID int, minerResult *Message) {
 
 func (job *Job) ProcessComplete() {
 	result := NewResult(job.minHash, job.minNonce)
-	rpayload, _ := json.Marshal(result)
-	job.server.Write(job.clientID, rpayload)
+	rpayload, err := json.Marshal(result)
+	// error while marshalling
+	if err != nil {
+		return
+	}
+	error := job.server.Write(job.clientID, rpayload)
+	// error while sending result to client
+	if error != nil {
+		return
+	}
 }
 
 // condition for when a job is considered to be complete
@@ -167,7 +184,8 @@ func (fcfs *FCFS) RemoveMiner(minerID int) {
 	if miner.Busy() {
 		job, _ := fcfs.GetJob(miner.currClientID)
 		chunk := job.minerMap[minerID]
-		// re-enqueue the chunk; do we need to remove it from the pendingChunks?
+		// re-enqueue the chunk
+		// Q1. do we need to remove it from the pendingChunks?
 		job.pendingChunks.Enqueue(chunk)
 	}
 	delete(fcfs.miners, minerID)

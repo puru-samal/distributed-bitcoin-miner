@@ -141,9 +141,14 @@ func (srv *server) processor() {
 		case config := <-srv.configureChan:
 			if config.disconnected {
 				isMiner := srv.scheduler.IsMiner(config.connID)
+				// if server loses contact with a miner
+				// reassign any job that was assigned to the miner
 				if isMiner {
 					srv.scheduler.RemoveMiner(config.connID)
 				} else {
+					// if server loses contact with a client
+					// cease working on any requests being done on behalf of the client
+					// wait for the miner's result and ignore its result
 					srv.scheduler.RemoveJob(config.connID)
 				}
 				//srv.handleDisconnected(config.connID)
@@ -162,8 +167,13 @@ func (srv *server) processor() {
 				minerID := config.connID
 				//clientID := miner.currClientID
 
-				job, clientID, _ := srv.scheduler.GetMinersJob(minerID)
+				job, clientID, exist := srv.scheduler.GetMinersJob(minerID)
 				srv.scheduler.MinerDone(minerID)
+				// if the client has been disconnected
+				// ignore the result
+				if !exist {
+					return
+				}
 				job.ProcessResult(minerID, config.message)
 
 				// send result back to cliet
