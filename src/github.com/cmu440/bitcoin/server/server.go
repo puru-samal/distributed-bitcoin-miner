@@ -11,18 +11,92 @@ import (
 	"github.com/cmu440/lsp"
 )
 
+// priorityQueue
+type priorityQueue struct {
+	q []*info
+}
+
+func newPQ() *priorityQueue {
+	newQueue := &priorityQueue{
+		q: make([]*info, 0),
+	}
+	return newQueue
+}
+
+func (pq *priorityQueue) insert(elem *info) {
+	pq.q = append(pq.q, elem)
+	pq.minHeapifyUp(len(pq.q) - 1)
+}
+
+func (pq *priorityQueue) getMin() (*info, error) {
+	if len(pq.q) == 0 {
+		return nil, fmt.Errorf("priority queue is empty")
+	}
+	return pq.q[0], nil
+}
+
+func (pq *priorityQueue) removeMin() (*info, error) {
+	min, err := pq.getMin()
+	if err != nil {
+		return nil, err
+	}
+	pq.q[0] = pq.q[len(pq.q)-1]
+	pq.q = pq.q[:len(pq.q)-1]
+	pq.minHeapifyDown(0)
+	return min, nil
+}
+
+func (pq *priorityQueue) empty() bool {
+	return len(pq.q) == 0
+}
+
+func (pq *priorityQueue) size() int {
+	return len(pq.q)
+}
+
+func (pq *priorityQueue) minHeapifyUp(i int) {
+	for i > 0 {
+		parent := (i - 1) / 2
+		if pq.q[parent].message.Nonce > pq.q[i].message.Nonce {
+			pq.q[parent], pq.q[i] = pq.q[i], pq.q[parent]
+			i = parent
+		} else {
+			break
+		}
+	}
+}
+
+func (pq *priorityQueue) minHeapifyDown(i int) {
+	for {
+		left := 2*i + 1
+		right := 2*i + 2
+		smallest := i
+		if left < len(pq.q) && pq.q[left].message.Nonce < pq.q[smallest].message.Nonce {
+			smallest = left
+		}
+		if right < len(pq.q) && pq.q[right].message.Nonce < pq.q[smallest].message.Nonce {
+			smallest = right
+		}
+		if smallest != i {
+			pq.q[i], pq.q[smallest] = pq.q[smallest], pq.q[i]
+			i = smallest
+		} else {
+			break
+		}
+	}
+}
+
+// server
 type server struct {
 	lspServer      lsp.Server
 	clientMap      map[int]*info
+	requestQueue   *priorityQueue
 	idleMiner      []int
 	connectedMiner []int
 	executingTasks map[int]*task
 
-	// Channels
-	clientRequestChan chan bool
-	minerJoinChan     chan bool
-	resultChan        chan int // return connID
-	disconnectedChan  chan int // return connID
+	// Channel
+	configureChan chan *config
 }
 
 type info struct {
@@ -31,13 +105,19 @@ type info struct {
 	minHashValue uint64
 	minHashNonce uint64
 	numTaskLeft  int
-	taskQueue    []*task // task priority queue
+	taskQueue    []*task // FIFO
 }
 
 type task struct {
 	connID int
 	start  uint64
 	end    uint64
+}
+
+type config struct {
+	connID       int
+	message      *bitcoin.Message
+	disconnected bool
 }
 
 func startServer(port int) (*server, error) {
@@ -50,6 +130,7 @@ func startServer(port int) (*server, error) {
 	server := &server{
 		lspServer:      lspServer,
 		clientMap:      make(map[int]*info),
+		requestQueue:   newPQ(),
 		idleMiner:      make([]int, 0),
 		connectedMiner: make([]int, 0),
 		executingTasks: make(map[int]*task),
@@ -103,10 +184,12 @@ func main() {
 }
 
 func (srv *server) reader() {
+
 	for {
 		connID, payload, err := srv.lspServer.Read()
+		disconnected := false
 		if err != nil {
-			srv.disconnectedChan <- connID
+			disconnected = true
 		}
 		// handle different type of message
 		var message bitcoin.Message
@@ -114,42 +197,42 @@ func (srv *server) reader() {
 		if err != nil {
 			return
 		}
-		switch message.Type {
-		case bitcoin.Join:
-			// handle join message
-			srv.minerJoinChan <- true
-		case bitcoin.Request:
-			// handle request message
-			srv.clientRequestChan <- true
-		case bitcoin.Result:
-			// handle result message
-			srv.resultChan <- connID
+		config := &config{
+			connID:       connID,
+			message:      &message,
+			disconnected: disconnected,
 		}
+
+		srv.configureChan <- config
 	}
 }
 
 func (srv *server) processor() {
 	for {
 		select {
-		case <-srv.clientRequestChan:
-			// handle client request
-			srv.handleClientRequest()
-		case <-srv.minerJoinChan:
-			// handle miner join
-			srv.handleMinerJoin()
-		case connID := <-srv.resultChan:
-			// handle result
-			srv.handleResult(connID)
-		case connID := <-srv.disconnectedChan:
-			// handle disconnected
-			srv.handleDisconnected(connID)
+		case config := <-srv.configureChan:
+			if config.disconnected {
+				srv.handleDisconnected(config.connID)
+			}
+			if config.message.Type == bitcoin.Join {
+				srv.handleMinerJoin(config.connID)
+			} else if config.message.Type == bitcoin.Request {
+				srv.handleClientRequest(config.connID)
+			} else if config.message.Type == bitcoin.Result {
+				srv.handleResult(config.connID)
+			}
 		}
 	}
 }
 
-func (srv *server) handleClientRequest() {}
+func (srv *server) handleClientRequest(connID int) {
 
-func (srv *server) handleMinerJoin() {}
+}
+
+func (srv *server) handleMinerJoin(connID int) {
+	srv.idleMiner = append(srv.idleMiner, connID)
+	srv.connectedMiner = append(srv.connectedMiner, connID)
+}
 
 func (srv *server) handleResult(connID int) {}
 
