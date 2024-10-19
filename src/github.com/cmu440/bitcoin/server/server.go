@@ -86,14 +86,23 @@ func (pq *priorityQueue) minHeapifyDown(i int) {
 	}
 }
 
+func (pq *priorityQueue) remove(elem *info) {
+	for i, e := range pq.q {
+		if e == elem {
+
+			break
+		}
+	}
+}
+
 // server
 type server struct {
 	lspServer      lsp.Server
-	clientMap      map[int]*info
+	clientMap      map[int]*info // clientID -> info
 	requestQueue   *priorityQueue
 	idleMiner      []int
 	connectedMiner []int
-	executingTasks map[int]*task
+	executingTasks map[int]*task // minerID -> task
 
 	// Channel
 	configureChan chan *config
@@ -109,7 +118,7 @@ type info struct {
 }
 
 type task struct {
-	connID int
+	connID int // clientID
 	start  uint64
 	end    uint64
 }
@@ -181,6 +190,7 @@ func main() {
 	// TODO: implement this!
 	go srv.reader()
 	go srv.processor()
+	go srv.distributor()
 }
 
 func (srv *server) reader() {
@@ -217,7 +227,7 @@ func (srv *server) processor() {
 			if config.message.Type == bitcoin.Join {
 				srv.handleMinerJoin(config.connID)
 			} else if config.message.Type == bitcoin.Request {
-				srv.handleClientRequest(config.connID)
+				srv.handleClientRequest(config.connID, config.message)
 			} else if config.message.Type == bitcoin.Result {
 				srv.handleResult(config.connID)
 			}
@@ -225,8 +235,23 @@ func (srv *server) processor() {
 	}
 }
 
-func (srv *server) handleClientRequest(connID int) {
+func (srv *server) distributor() {
 
+}
+
+func (srv *server) handleClientRequest(connID int, message *bitcoin.Message) {
+	// need to divide the request into chunks
+	// need update on the numTaskLeft and taskQueue
+	requestInfo := &info{
+		connID:       connID,
+		message:      message,
+		minHashValue: ^uint64(0),
+		minHashNonce: 0,
+		numTaskLeft:  0,
+		taskQueue:    make([]*task, 0),
+	}
+	srv.clientMap[connID] = requestInfo
+	srv.requestQueue.insert(requestInfo)
 }
 
 func (srv *server) handleMinerJoin(connID int) {
@@ -234,6 +259,36 @@ func (srv *server) handleMinerJoin(connID int) {
 	srv.connectedMiner = append(srv.connectedMiner, connID)
 }
 
-func (srv *server) handleResult(connID int) {}
+func (srv *server) handleResult(connID int, message *bitcoin.Message) {
+	clientID := srv.executingTasks[connID].connID
+	requestInfo, exist := srv.clientMap[clientID]
+
+	delete(srv.executingTasks, connID)
+	srv.idleMiner = append(srv.idleMiner, connID)
+	if !exist {
+		return
+	}
+
+	requestInfo.numTaskLeft--
+	if message.Hash < requestInfo.minHashValue {
+		requestInfo.minHashValue = message.Hash
+		requestInfo.minHashNonce = message.Nonce
+	}
+	if requestInfo.numTaskLeft == 0 {
+		// send the result back to the client
+		result := bitcoin.NewResult(requestInfo.minHashValue, requestInfo.minHashNonce)
+		payload, err := json.Marshal(result)
+		if err != nil {
+			return
+		}
+		err = srv.lspServer.Write(clientID, payload)
+		if err != nil {
+			return
+		}
+		delete(srv.clientMap, clientID)
+		srv.requestQueue.remove(requestInfo)
+	}
+
+}
 
 func (srv *server) handleDisconnected(connID int) {}
