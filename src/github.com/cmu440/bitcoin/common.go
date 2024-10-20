@@ -64,24 +64,19 @@ func NewJob(server lsp.Server, clientID int, data string, clientRequest *Message
 // this involves removing a chunk from a queue
 // if it exists, then moving it to the minerMap
 // a payload should be immediately sent to the miner
-func (job *Job) AssignToMiner(minerID int) bool {
+func (job *Job) AssignToMiner(minerID int) (bool, error) {
 	chunk, exist := job.pendingChunks.Dequeue() // Get the first chunk
 	if !exist {
-		return false
+		return false, nil
 	}
 	job.minerMap[minerID] = chunk
-	payload, err := json.Marshal(chunk.request)
-	if err != nil {
-		return false
-	}
+	payload, _ := json.Marshal(chunk.request)
 	error := job.server.Write(minerID, payload)
-	// miner is lost - channel or RemoveMiner?
+	// miner is lost
 	if error != nil {
-
-		return false
+		return true, error
 	}
-
-	return true
+	return true, nil
 }
 
 // updates minHash and minNonce when a result is recv'd from a miner
@@ -232,13 +227,17 @@ func (fcfs *FCFS) ScheduleJobs() bool {
 
 	for _, miner := range fcfs.miners {
 		if !miner.Busy() {
-			exist := currJob.AssignToMiner(miner.minerID)
-			if !exist {
+			exist, err := currJob.AssignToMiner(miner.minerID)
+			// pendingChunks is empty
+			if !exist && err == nil {
 				newJob, err := jobQ.RemoveMin()
 				if err != nil {
 					return true
 				}
 				currJob = newJob
+			} else if err != nil {
+				// miner is lost
+				fcfs.RemoveMiner(miner.minerID)
 			}
 		}
 	}
