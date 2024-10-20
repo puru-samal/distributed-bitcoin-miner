@@ -113,6 +113,10 @@ func (job *Job) Complete() bool {
 	return job.pendingChunks.Empty()
 }
 
+func (job *Job) GetMinHash() (uint64, uint64) {
+	return job.minHash, job.minNonce
+}
+
 // Miner  ______________________________________________________________________________
 type Miner struct {
 	minerID      int // miner connID that joined the server

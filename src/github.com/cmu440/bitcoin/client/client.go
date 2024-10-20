@@ -79,6 +79,7 @@ func main() {
 		LOGF.Printf("[Client[id %d] MsgRecv]: %s\n", client.ConnID(), msg.String())
 		// error when unmarshalling
 		if error != nil {
+			LOGF.Printf("[Client[id %d] Error]: %s\n", client.ConnID(), error.Error())
 			return
 		}
 		printResult(msg.Hash, msg.Nonce)
