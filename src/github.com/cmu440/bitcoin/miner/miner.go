@@ -86,7 +86,7 @@ func main() {
 	// You may need a logger for debug purpose
 	const (
 		name = "minerLog.txt"
-		flag = os.O_RDWR | os.O_CREATE
+		flag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 		perm = os.FileMode(0666)
 	)
 
@@ -107,7 +107,6 @@ func main() {
 	hostport := os.Args[1]
 	miner, err := joinWithServer(hostport)
 	if err != nil {
-		LOGF.Printf("[Miner[id %d] Join Fail]\n", miner.ConnID())
 		fmt.Println("Failed to join with server:", err)
 		return
 	}

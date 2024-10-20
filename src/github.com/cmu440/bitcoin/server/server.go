@@ -35,9 +35,10 @@ func startServer(port int) (*server, error) {
 		return nil, err
 	}
 	server := &server{
-		lspServer: lspServer,
-		rStats:    bitcoin.RunningStats{},
-		scheduler: bitcoin.NewFCFS(lspServer),
+		lspServer:     lspServer,
+		rStats:        bitcoin.NewRS(),
+		scheduler:     bitcoin.NewFCFS(lspServer),
+		configureChan: make(chan *config),
 	}
 	return server, nil
 }
@@ -48,7 +49,7 @@ func main() {
 	// You may need a logger for debug purpose
 	const (
 		name = "serverLog.txt"
-		flag = os.O_RDWR | os.O_CREATE
+		flag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 		perm = os.FileMode(0666)
 	)
 
@@ -84,7 +85,8 @@ func main() {
 
 	// TODO: implement this!
 	go srv.reader()
-	go srv.processor()
+	srv.processor()
+
 }
 
 func (srv *server) reader() {
@@ -106,61 +108,60 @@ func (srv *server) reader() {
 			message:      &message,
 			disconnected: disconnected,
 		}
-
+		LOGF.Printf("[Server Msg Recieved] connID:%d msg:%s\n", config.connID, config.message)
 		srv.configureChan <- config
+		LOGF.Printf("[Server Reader Blocking Check]\n")
 	}
 }
 
 func (srv *server) processor() {
 	for {
-		select {
-		case config := <-srv.configureChan:
-			if config.disconnected {
-				isMiner := srv.scheduler.IsMiner(config.connID)
-				// if server loses contact with a miner
-				// reassign any job that was assigned to the miner
-				if isMiner {
-					LOGF.Printf("[Miner[id %d] Disconnect]\n", config.connID)
-					srv.scheduler.RemoveMiner(config.connID)
-				} else {
-					// if server loses contact with a client
-					// cease working on any requests being done on behalf of the client
-					// wait for the miner's result and ignore its result
-					LOGF.Printf("[Client[id %d] Disconnect]\n", config.connID)
-					srv.scheduler.RemoveJob(config.connID)
-				}
-
+		config := <-srv.configureChan
+		LOGF.Printf("[Server Proc Blocking Check]\n")
+		if config.disconnected {
+			isMiner := srv.scheduler.IsMiner(config.connID)
+			// if server loses contact with a miner
+			// reassign any job that was assigned to the miner
+			if isMiner {
+				LOGF.Printf("[Miner[id %d] Disconnect]\n", config.connID)
+				srv.scheduler.RemoveMiner(config.connID)
+			} else {
+				// if server loses contact with a client
+				// cease working on any requests being done on behalf of the client
+				// wait for the miner's result and ignore its result
+				LOGF.Printf("[Client[id %d] Disconnect]\n", config.connID)
+				srv.scheduler.RemoveJob(config.connID)
 			}
-			if config.message.Type == bitcoin.Join {
-				LOGF.Printf("[Miner[id %d] Connected]\n", config.connID)
-				srv.scheduler.AddMiner(config.connID)
-				srv.scheduler.ScheduleJobs()
 
-			} else if config.message.Type == bitcoin.Request {
-				LOGF.Printf("[Client[id %d] Request]: %s\n", config.connID, config.message.Data)
-				srv.rStats.StartRecording(config.connID)
-				job := bitcoin.NewJob(srv.lspServer, config.connID, config.message.Data, config.message, 10000)
-				srv.scheduler.AddJob(job)
-				srv.scheduler.ScheduleJobs()
+		}
+		if config.message.Type == bitcoin.Join {
+			LOGF.Printf("[Miner[id %d] Connected]\n", config.connID)
+			srv.scheduler.AddMiner(config.connID)
+			srv.scheduler.ScheduleJobs()
 
-			} else if config.message.Type == bitcoin.Result {
-				minerID := config.connID
+		} else if config.message.Type == bitcoin.Request {
+			LOGF.Printf("[Client[id %d] Request]: %s\n", config.connID, config.message.Data)
+			srv.rStats.StartRecording(config.connID)
+			job := bitcoin.NewJob(srv.lspServer, config.connID, config.message.Data, config.message, 10000)
+			srv.scheduler.AddJob(job)
+			srv.scheduler.ScheduleJobs()
 
-				job, clientID, exist := srv.scheduler.GetMinersJob(minerID)
-				srv.scheduler.MinerDone(minerID)
-				// if the client has been disconnected
-				// ignore the result
-				if !exist {
-					return
-				}
+		} else if config.message.Type == bitcoin.Result {
+
+			LOGF.Printf("[Miner[id %d] Result Received] result:%s\n", config.connID, config.message)
+			minerID := config.connID
+
+			job, clientID, exist := srv.scheduler.GetMinersJob(minerID)
+			srv.scheduler.MinerDone(minerID)
+			// if the client has been disconnected
+			// ignore the result
+			if exist {
 				job.ProcessResult(minerID, config.message)
-
 				currMinHash, currMinNonce := job.GetMinHash()
-
-				LOGF.Printf("[Miner[id %d] Result Received] currentMinHash:%s currentMinNonce:%s\n", config.connID, currMinHash, currMinNonce)
+				LOGF.Printf("[Miner[id %d] Result Received] currentMinHash:%d currentMinNonce:%d\n", config.connID, currMinHash, currMinNonce)
 				// send result back to cliet
 				if job.Complete() {
-					LOGF.Printf("[Client[id %d] Final Result Send] minHash:%s minNonce:%s\n", clientID, currMinHash, currMinNonce)
+					LOGF.Printf("[Client[id %d] Final Result Send] minHash:%d minNonce:%d\n", clientID, currMinHash, currMinNonce)
 					srv.rStats.StopRecording(clientID)
 					job.ProcessComplete()
 					srv.scheduler.RemoveJob(clientID)

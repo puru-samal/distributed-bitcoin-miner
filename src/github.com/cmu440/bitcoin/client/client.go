@@ -20,7 +20,7 @@ func main() {
 	// You may need a logger for debug purpose
 	const (
 		name = "clientLog.txt"
-		flag = os.O_RDWR | os.O_CREATE
+		flag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 		perm = os.FileMode(0666)
 	)
 
@@ -49,10 +49,10 @@ func main() {
 
 	client, err := lsp.NewClient(hostport, isn, lsp.NewParams())
 	if err != nil {
-		LOGF.Printf("[Client[id %d] Connection Failed]\n", client.ConnID())
 		fmt.Println("Failed to connect to server:", err)
 		return
 	}
+
 	LOGF.Printf("[Client[id %d] Connected]\n", client.ConnID())
 
 	defer client.Close()

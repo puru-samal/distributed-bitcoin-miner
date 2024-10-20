@@ -142,6 +142,7 @@ func (w *Miner) Busy() bool {
 
 // Scheduler Interface  _________________________________________________________________
 // A generic scheduler interface for load balancing algorithms.
+
 type Scheduler interface {
 	AddMiner(minerID int)
 	IsMiner(id int) bool
@@ -213,15 +214,18 @@ func (fcfs *FCFS) RemoveMiner(minerID int) {
 func (fcfs *FCFS) GetMinersJob(minerID int) (*Job, int, bool) {
 	miner := fcfs.miners[minerID]
 	job, exist := fcfs.GetJob(miner.currClientID)
-	return job, job.clientID, exist
+	return job, -1, exist
 }
 
 // add a job to the job list when a client request is recv'd
 func (fcfs *FCFS) AddJob(job *Job) {
 	fcfs.jobs[job.clientID] = job
+	fmt.Printf("[AddJob] connID: %d\n", job.clientID)
+
 }
 
 func (fcfs *FCFS) GetJob(clientID int) (*Job, bool) {
+	fmt.Printf("[GetJob] connID: %d\n", clientID)
 	job, exist := fcfs.jobs[clientID]
 	return job, exist
 }
@@ -269,6 +273,11 @@ func (fcfs *FCFS) ScheduleJobs() bool {
 	for len(fcfs.idleMiners) > 0 && !fcfs.JobComplete() {
 		minerID := fcfs.idleMiners[0]
 		exist, err := currJob.AssignToMiner(minerID)
+
+		if exist {
+			fcfs.miners[minerID].currClientID = currJob.clientID
+		}
+
 		// pendingChunks is empty
 		if !exist && err == nil {
 			newJob, err := jobQ.RemoveMin()
@@ -302,6 +311,16 @@ type RunningStats struct {
 	mean          float64           // running mean
 	M2            float64           // sum of squared diffs from the mean (used for std_dev)
 	activeRecords map[int]time.Time // map keeping track of job start times
+}
+
+func NewRS() RunningStats {
+	rs := RunningStats{
+		n:             0,
+		mean:          0.0,
+		M2:            0.0,
+		activeRecords: make(map[int]time.Time),
+	}
+	return rs
 }
 
 // records the start time of a job
