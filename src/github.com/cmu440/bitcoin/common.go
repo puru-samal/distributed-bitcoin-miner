@@ -15,6 +15,11 @@ type Chunk struct {
 	request *Message // The job request msg for this chunk
 }
 
+// inclusive lower and upper bounds
+func (c *Chunk) GetSize() uint64 {
+	return c.request.Upper - c.request.Lower + 1
+}
+
 // Job  _________________________________________________________________________________
 // A job is essentially a collection of chunks
 type Job struct {
@@ -112,6 +117,11 @@ func (job *Job) GetMinHash() (uint64, uint64) {
 	return job.minHash, job.minNonce
 }
 
+// for SRTF
+func (job *Job) GetPendingChunks() int {
+	return job.pendingChunks.Size()
+}
+
 // Miner  ______________________________________________________________________________
 type Miner struct {
 	minerID      int // miner connID that joined the server
@@ -142,23 +152,26 @@ type Scheduler interface {
 	RemoveJob(clientID int)
 	GetJob(clientID int) (*Job, bool)
 	ScheduleJobs() bool
+	JobComplete() bool
 }
 
 // FCFS Scheduler  ______________________________________________________________________
 // A simple baseline first-come-first-served scheduler. Requests are processed in the order
 // they are recieved
 type FCFS struct {
-	server lsp.Server
-	miners map[int]*Miner
-	jobs   map[int]*Job
+	server     lsp.Server
+	miners     map[int]*Miner
+	jobs       map[int]*Job
+	idleMiners []int // list of idle minerIDs
 }
 
 // initialize
 func NewFCFS(srv lsp.Server) *FCFS {
 	return &FCFS{
-		server: srv,
-		miners: make(map[int]*Miner),
-		jobs:   make(map[int]*Job),
+		server:     srv,
+		miners:     make(map[int]*Miner),
+		jobs:       make(map[int]*Job),
+		idleMiners: make([]int, 0),
 	}
 }
 
@@ -166,6 +179,7 @@ func NewFCFS(srv lsp.Server) *FCFS {
 func (fcfs *FCFS) AddMiner(minerID int) {
 	miner := NewMiner(minerID)
 	fcfs.miners[minerID] = miner
+	fcfs.idleMiners = append(fcfs.idleMiners, minerID)
 }
 
 func (fcfs *FCFS) IsMiner(id int) bool {
@@ -175,6 +189,7 @@ func (fcfs *FCFS) IsMiner(id int) bool {
 
 func (fcfs *FCFS) MinerDone(minerID int) {
 	fcfs.miners[minerID].currClientID = -1
+	fcfs.idleMiners = append(fcfs.idleMiners, minerID)
 }
 
 // remove a miner when a miner is disconnected
@@ -184,10 +199,15 @@ func (fcfs *FCFS) RemoveMiner(minerID int) {
 		job, _ := fcfs.GetJob(miner.currClientID)
 		chunk := job.minerMap[minerID]
 		// re-enqueue the chunk
-		// Q1. do we need to remove it from the pendingChunks?
 		job.pendingChunks.Enqueue(chunk)
 	}
 	delete(fcfs.miners, minerID)
+	for i, id := range fcfs.idleMiners {
+		if id == minerID {
+			fcfs.idleMiners = append(fcfs.idleMiners[:i], fcfs.idleMiners[i+1:]...)
+			break
+		}
+	}
 }
 
 func (fcfs *FCFS) GetMinersJob(minerID int) (*Job, int, bool) {
@@ -211,6 +231,10 @@ func (fcfs *FCFS) RemoveJob(clientID int) {
 	delete(fcfs.jobs, clientID)
 }
 
+func (fcfs *FCFS) JobComplete() bool {
+	return len(fcfs.jobs) == 0
+}
+
 // fcfs scheduler, false means nothing was scheduled
 func (fcfs *FCFS) ScheduleJobs() bool {
 	if len(fcfs.jobs) == 0 {
@@ -225,22 +249,40 @@ func (fcfs *FCFS) ScheduleJobs() bool {
 
 	currJob, _ := jobQ.RemoveMin()
 
-	for _, miner := range fcfs.miners {
-		if !miner.Busy() {
-			exist, err := currJob.AssignToMiner(miner.minerID)
-			// pendingChunks is empty
-			if !exist && err == nil {
-				newJob, err := jobQ.RemoveMin()
-				if err != nil {
-					return true
-				}
-				currJob = newJob
-			} else if err != nil {
-				// miner is lost
-				fcfs.RemoveMiner(miner.minerID)
+	// for _, miner := range fcfs.miners {
+	// 	if !miner.Busy() {
+	// 		exist, err := currJob.AssignToMiner(miner.minerID)
+	// 		// pendingChunks is empty
+	// 		if !exist && err == nil {
+	// 			newJob, err := jobQ.RemoveMin()
+	// 			if err != nil {
+	// 				return true
+	// 			}
+	// 			currJob = newJob
+	// 		} else if err != nil {
+	// 			// miner is lost
+	// 			fcfs.RemoveMiner(miner.minerID)
+	// 		}
+	// 	}
+	// }
+
+	for len(fcfs.idleMiners) > 0 && !fcfs.JobComplete() {
+		minerID := fcfs.idleMiners[0]
+		exist, err := currJob.AssignToMiner(minerID)
+		// pendingChunks is empty
+		if !exist && err == nil {
+			newJob, err := jobQ.RemoveMin()
+			if err != nil {
+				return true
 			}
+			currJob = newJob
+		} else if err != nil {
+			// miner is lost
+			fcfs.RemoveMiner(minerID)
 		}
+		fcfs.idleMiners = fcfs.idleMiners[1:]
 	}
+
 	return true
 }
 
@@ -330,6 +372,10 @@ func (q *ChunkQ) Size() int {
 
 func (q *ChunkQ) Empty() bool {
 	return len(q.chunks) == 0
+}
+
+func (q *ChunkQ) Peek() *Chunk {
+	return q.chunks[0]
 }
 
 // Time-Based PQ  _______________________________________________________________________
@@ -424,12 +470,28 @@ func (pq *jobTimeQ) minHeapifyDown(idx int) {
 	lch := pq.leftChild(idx)
 	rch := pq.rightChild(idx)
 	minIdx := idx
-	if pq.isValidIdx(lch) && pq.q[minIdx].startTime.Compare(pq.q[lch].startTime) == 1 {
+
+	// prioritize based on the shortest pendingChunks
+	// if the pendingChunks are equal, prioritize based on the size of the chunk
+	if pq.isValidIdx(lch) && pq.q[minIdx].GetPendingChunks() > pq.q[lch].GetPendingChunks() {
+		minIdx = lch
+	} else if pq.isValidIdx(lch) && pq.q[minIdx].GetPendingChunks() == pq.q[lch].GetPendingChunks() && pq.q[minIdx].pendingChunks.Peek().GetSize() > pq.q[lch].pendingChunks.Peek().GetSize() {
 		minIdx = lch
 	}
-	if pq.isValidIdx(rch) && pq.q[minIdx].startTime.Compare(pq.q[rch].startTime) == 1 {
+	if pq.isValidIdx(rch) && pq.q[minIdx].GetPendingChunks() > pq.q[rch].GetPendingChunks() {
+		minIdx = rch
+	} else if pq.isValidIdx(rch) && pq.q[minIdx].GetPendingChunks() == pq.q[rch].GetPendingChunks() && pq.q[minIdx].pendingChunks.Peek().GetSize() > pq.q[rch].pendingChunks.Peek().GetSize() {
 		minIdx = rch
 	}
+
+	// prioritize based on the earliest startTime
+	// if pq.isValidIdx(lch) && pq.q[minIdx].startTime.Compare(pq.q[lch].startTime) == 1 {
+	// 	minIdx = lch
+	// }
+	// if pq.isValidIdx(rch) && pq.q[minIdx].startTime.Compare(pq.q[rch].startTime) == 1 {
+	// 	minIdx = rch
+	// }
+
 	if minIdx != idx {
 		tmp := pq.q[idx]
 		pq.q[idx] = pq.q[minIdx]
@@ -446,9 +508,19 @@ func (pq *jobTimeQ) minHeapifyUp(idx int) {
 	}
 	p := pq.parent(idx)
 	maxIdx := idx
-	if pq.isValidIdx(p) && pq.q[maxIdx].startTime.Compare(pq.q[p].startTime) == -1 {
+
+	// prioritize based on the shortest pendingChunks
+	// if the pendingChunks are equal, prioritize based on the size of the chunk
+	if pq.isValidIdx(p) && pq.q[maxIdx].GetPendingChunks() < pq.q[p].GetPendingChunks() {
+		maxIdx = p
+	} else if pq.isValidIdx(p) && pq.q[maxIdx].GetPendingChunks() == pq.q[p].GetPendingChunks() && pq.q[maxIdx].pendingChunks.Peek().GetSize() < pq.q[p].pendingChunks.Peek().GetSize() {
 		maxIdx = p
 	}
+
+	// prioritize based on the earliest startTime
+	// if pq.isValidIdx(p) && pq.q[maxIdx].startTime.Compare(pq.q[p].startTime) == -1 {
+	// 	maxIdx = p
+	// }
 	if maxIdx != idx {
 		tmp := pq.q[idx]
 		pq.q[idx] = pq.q[maxIdx]
