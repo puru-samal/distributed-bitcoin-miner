@@ -214,7 +214,7 @@ func (fcfs *FCFS) RemoveMiner(minerID int) {
 func (fcfs *FCFS) GetMinersJob(minerID int) (*Job, int, bool) {
 	miner := fcfs.miners[minerID]
 	job, exist := fcfs.GetJob(miner.currClientID)
-	return job, -1, exist
+	return job, miner.currClientID, exist
 }
 
 // add a job to the job list when a client request is recv'd

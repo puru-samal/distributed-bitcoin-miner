@@ -35,7 +35,7 @@ func joinWithServer(hostport string) (lsp.Client, error) {
 // Helper function that handles miner processing.
 // Reads a request from a server, does its work and sends result to server
 // If a non-nil error is encountered during Read/Write, it returns
-func processMiner(miner lsp.Client, logger *log.Logger) {
+func processMiner(miner lsp.Client, LOGF *log.Logger) {
 	for {
 
 		// will block until request sent by server
@@ -43,7 +43,7 @@ func processMiner(miner lsp.Client, logger *log.Logger) {
 
 		// miner loses contact with the server -> shut down
 		if err != nil {
-			logger.Printf("[Miner[id %d] Disconnect]\n", miner.ConnID())
+			LOGF.Printf("[Miner[id %d] Disconnect]\n", miner.ConnID())
 			return
 		}
 
@@ -53,7 +53,7 @@ func processMiner(miner lsp.Client, logger *log.Logger) {
 
 		var request bitcoin.Message
 		json.Unmarshal(payload, &request)
-		logger.Printf("[Miner[id %d] MsgRecv]: %s\n", miner.ConnID(), request.String())
+		LOGF.Printf("[Miner[id %d] MsgRecv]: %s\n", miner.ConnID(), request.String())
 
 		hash := bitcoin.Hash(request.Data, request.Lower)
 		nonce := request.Lower
@@ -71,10 +71,10 @@ func processMiner(miner lsp.Client, logger *log.Logger) {
 
 		// miner loses contact with the server -> shut down
 		rerr := miner.Write(rpayload)
-		logger.Printf("[Miner[id %d] MsgSend]: %s\n", miner.ConnID(), request.String())
+		LOGF.Printf("[Miner[id %d] MsgSend]: %s\n", miner.ConnID(), request.String())
 
 		if rerr != nil {
-			logger.Printf("[Miner[id %d] Disconnect]\n", miner.ConnID())
+			LOGF.Printf("[Miner[id %d] Disconnect]\n", miner.ConnID())
 			return
 		}
 	}
