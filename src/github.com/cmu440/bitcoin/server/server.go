@@ -86,6 +86,7 @@ func main() {
 	// TODO: implement this!
 	go srv.reader()
 	srv.processor()
+	fmt.Printf("[Server Done]")
 
 }
 
@@ -166,6 +167,7 @@ func (srv *server) processor() {
 					job.ProcessComplete()
 					srv.scheduler.RemoveJob(clientID)
 					mean, dev := srv.rStats.GetStats()
+					fmt.Printf("[Final Stat]: %f %f\n", mean, dev)
 					LOGF.Printf("[Final Stat]: %f %f\n", mean, dev)
 				}
 				srv.scheduler.ScheduleJobs()

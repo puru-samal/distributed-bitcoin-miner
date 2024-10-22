@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/cmu440/bitcoin"
@@ -35,7 +36,7 @@ func joinWithServer(hostport string) (lsp.Client, error) {
 // Helper function that handles miner processing.
 // Reads a request from a server, does its work and sends result to server
 // If a non-nil error is encountered during Read/Write, it returns
-func processMiner(miner lsp.Client, LOGF *log.Logger) {
+func processMiner(miner lsp.Client, latency int64, LOGF *log.Logger) {
 	for {
 
 		// will block until request sent by server
@@ -70,6 +71,7 @@ func processMiner(miner lsp.Client, LOGF *log.Logger) {
 		rpayload, _ := json.Marshal(result)
 
 		// miner loses contact with the server -> shut down
+		time.Sleep(time.Duration(latency) * time.Millisecond)
 		rerr := miner.Write(rpayload)
 		LOGF.Printf("[Miner[id %d] MsgSend]: %s\n", miner.ConnID(), request.String())
 
@@ -98,9 +100,21 @@ func main() {
 
 	LOGF := log.New(file, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
 
-	const numArgs = 2
-	if len(os.Args) != numArgs {
-		fmt.Printf("Usage: ./%s <hostport>", os.Args[0])
+	/*
+		const numArgs = 2
+		if len(os.Args) != numArgs {
+			fmt.Printf("Usage: ./%s <hostport>", os.Args[0])
+			return
+		}
+	*/
+	const numArgs = 3
+	if len(os.Args) != numArgs || len(os.Args) != 3 {
+		if numArgs == 2 {
+			fmt.Printf("Usage: ./%s <hostport>", os.Args[0])
+		}
+		if numArgs == 3 {
+			fmt.Printf("Usage: ./%s <hostport> <latency>", os.Args[0])
+		}
 		return
 	}
 
@@ -116,6 +130,11 @@ func main() {
 	defer miner.Close()
 
 	// TODO: implement this!
-	processMiner(miner, LOGF)
-
+	latency := 0
+	if numArgs == 3 {
+		l, _ := strconv.Atoi(os.Args[2])
+		latency = l
+	}
+	fmt.Printf("[Miner Latency]: %d\n", latency)
+	processMiner(miner, int64(latency), LOGF)
 }
