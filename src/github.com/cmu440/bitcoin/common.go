@@ -153,7 +153,7 @@ type Scheduler interface {
 	RemoveJob(clientID int)
 	GetJob(clientID int) (*Job, bool)
 	ScheduleJobs() bool
-	JobComplete() bool
+	JobsComplete() bool
 }
 
 // FCFS Scheduler  ______________________________________________________________________
@@ -164,6 +164,7 @@ type FCFS struct {
 	miners     map[int]*Miner
 	jobs       map[int]*Job
 	idleMiners []int // list of idle minerIDs
+	reassignQ  *ChunkQ
 }
 
 // initialize
@@ -173,6 +174,7 @@ func NewFCFS(srv lsp.Server) *FCFS {
 		miners:     make(map[int]*Miner),
 		jobs:       make(map[int]*Job),
 		idleMiners: make([]int, 0),
+		reassignQ:  &ChunkQ{},
 	}
 }
 
@@ -200,7 +202,8 @@ func (fcfs *FCFS) RemoveMiner(minerID int) {
 		job, _ := fcfs.GetJob(miner.currClientID)
 		chunk := job.minerMap[minerID]
 		// re-enqueue the chunk
-		job.pendingChunks.Enqueue(chunk)
+		//job.pendingChunks.Enqueue(chunk)
+		fcfs.reassignQ.Enqueue(chunk)
 	}
 	delete(fcfs.miners, minerID)
 	for i, id := range fcfs.idleMiners {
@@ -235,7 +238,7 @@ func (fcfs *FCFS) RemoveJob(clientID int) {
 	delete(fcfs.jobs, clientID)
 }
 
-func (fcfs *FCFS) JobComplete() bool {
+func (fcfs *FCFS) JobsComplete() bool {
 	return len(fcfs.jobs) == 0
 }
 
@@ -243,6 +246,24 @@ func (fcfs *FCFS) JobComplete() bool {
 func (fcfs *FCFS) ScheduleJobs() bool {
 	if len(fcfs.jobs) == 0 {
 		return false
+	}
+
+	for !fcfs.reassignQ.Empty() {
+		if len(fcfs.idleMiners) == 0 {
+			break
+		}
+		reassignChunk, _ := fcfs.reassignQ.Dequeue()
+
+		for len(fcfs.idleMiners) > 0 {
+			minerID := fcfs.idleMiners[0]
+			payload, _ := json.Marshal(reassignChunk.request)
+			err := fcfs.server.Write(minerID, payload)
+			if err == nil {
+				fcfs.idleMiners = fcfs.idleMiners[1:]
+				break
+			}
+			fcfs.RemoveMiner(minerID)
+		}
 	}
 
 	// earliest job
@@ -270,7 +291,7 @@ func (fcfs *FCFS) ScheduleJobs() bool {
 	// 	}
 	// }
 
-	for len(fcfs.idleMiners) > 0 && !fcfs.JobComplete() {
+	for len(fcfs.idleMiners) > 0 && !fcfs.JobsComplete() {
 		minerID := fcfs.idleMiners[0]
 		exist, err := currJob.AssignToMiner(minerID)
 
