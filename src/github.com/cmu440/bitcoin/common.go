@@ -11,6 +11,9 @@ import (
 
 // Chunk  _______________________________________________________________________________
 // In this system, a Chunk is the smallest unit of work that can be done by a miner
+
+const ChunkSize = 10000
+
 type Chunk struct {
 	request *Message // The job request msg for this chunk
 }
@@ -18,6 +21,11 @@ type Chunk struct {
 // inclusive lower and upper bounds
 func (c *Chunk) GetSize() uint64 {
 	return c.request.Upper - c.request.Lower + 1
+}
+
+func (c *Chunk) String() string {
+	result := fmt.Sprintf("Chunk:[min:%d  max:%d]", c.request.Lower, c.request.Upper)
+	return result
 }
 
 // Job  _________________________________________________________________________________
@@ -31,11 +39,13 @@ type Job struct {
 	minHash       uint64         // the current min hash
 	minNonce      uint64         // the current minNonce
 	pendingChunks *ChunkQ        // queue of pending chunks
-	minerMap      map[int]*Chunk // map of minerID -> *Chunk
+	minerMap      map[int]*Chunk // map of minerID -> *Chunk => only contains chunks assigned to miners
+	nChunks       int            // numbers of chunks created
 }
 
 // creates a new job upon getting a client request
 // breaks the client request into Chunks that are stored in pendingChunks
+// invariant: len(pendingCunks) + len(minerMap) = nChunks
 func NewJob(server lsp.Server, clientID int, data string, clientRequest *Message, chunkSize uint64) *Job {
 
 	job := &Job{
@@ -48,6 +58,7 @@ func NewJob(server lsp.Server, clientID int, data string, clientRequest *Message
 		minNonce:      math.MaxUint64,
 		pendingChunks: &ChunkQ{},
 		minerMap:      make(map[int]*Chunk),
+		nChunks:       0,
 	}
 
 	for i := uint64(0); i < job.maxNonce; i += chunkSize {
@@ -61,26 +72,39 @@ func NewJob(server lsp.Server, clientID int, data string, clientRequest *Message
 			request: NewRequest(job.data, lower, upper),
 		}
 		job.pendingChunks.Enqueue(chunk)
+		job.nChunks++
 	}
 	return job
+}
+
+func (job *Job) GetChunkAssignedToMiner(minerID int) (*Chunk, bool) {
+	chunk, exist := job.minerMap[minerID]
+	return chunk, exist
+}
+
+func (job *Job) RemoveChunkAssignedToMiner(minerID int) {
+	delete(job.minerMap, minerID)
 }
 
 // assigns a job to a miner
 // this involves removing a chunk from a queue
 // if it exists, then moving it to the minerMap
 // a payload should be immediately sent to the miner
-func (job *Job) AssignToMiner(minerID int) (bool, error) {
+// returns true if a chunk exists, false if not
+// returns an nil if a request was sent to miner
+// returns a non-nil error if seding failed for potential reassignment
+func (job *Job) AssignChunkToMiner(minerID int) (bool, error) {
 	chunk, exist := job.pendingChunks.Dequeue() // Get the first chunk
 	if !exist {
 		return false, nil
 	}
-	job.minerMap[minerID] = chunk
 	payload, _ := json.Marshal(chunk.request)
 	error := job.server.Write(minerID, payload)
 	// miner is lost
 	if error != nil {
 		return true, error
 	}
+	job.minerMap[minerID] = chunk
 	return true, nil
 }
 
@@ -94,26 +118,22 @@ func (job *Job) ProcessResult(minerID int, minerResult *Message) {
 	}
 }
 
+// Called when a job is complete
+// server sends the result to client
 func (job *Job) ProcessComplete() {
 	result := NewResult(job.minHash, job.minNonce)
-	rpayload, err := json.Marshal(result)
-	// error while marshalling
-	if err != nil {
-		return
-	}
-	error := job.server.Write(job.clientID, rpayload)
-	// error while sending result to client
-	if error != nil {
-		return
-	}
+	rpayload, _ := json.Marshal(result)
+	job.server.Write(job.clientID, rpayload)
 }
 
 // condition for when a job is considered to be complete
+// when all pendingChunks.Empty() && len(minerMap) == 0
 func (job *Job) Complete() bool {
-	return job.pendingChunks.Empty()
+	return job.pendingChunks.Empty() && len(job.minerMap) == 0
 }
 
-func (job *Job) GetMinHash() (uint64, uint64) {
+// gets the current minimum hash and nonce
+func (job *Job) GetCurrResult() (uint64, uint64) {
 	return job.minHash, job.minNonce
 }
 
@@ -128,6 +148,7 @@ type Miner struct {
 	currClientID int // current job worker is assigned to. Note: Miner is only processing a chunk.
 }
 
+// Create new miner
 func NewMiner(minerID int) *Miner {
 	worker := &Miner{
 		minerID:      minerID,
@@ -140,182 +161,162 @@ func (w *Miner) Busy() bool {
 	return w.currClientID != -1
 }
 
-// Scheduler Interface  _________________________________________________________________
-// A generic scheduler interface for load balancing algorithms.
+// Scheduler  ______________________________________________________________________
 
-type Scheduler interface {
-	AddMiner(minerID int)
-	IsMiner(id int) bool
-	MinerDone(minerID int)
-	RemoveMiner(minerID int)
-	GetMinersJob(minerID int) (*Job, int, bool)
-	AddJob(job *Job)
-	RemoveJob(clientID int)
-	GetJob(clientID int) (*Job, bool)
-	ScheduleJobs() bool
-	JobsComplete() bool
+type Scheduler struct {
+	server lsp.Server
+	miners map[int]*Miner // key: minerID
+	jobs   map[int]*Job   // key: clientID
 }
 
-// FCFS Scheduler  ______________________________________________________________________
-// A simple baseline first-come-first-served scheduler. Requests are processed in the order
-// they are recieved
-type FCFS struct {
-	server     lsp.Server
-	miners     map[int]*Miner
-	jobs       map[int]*Job
-	idleMiners []int // list of idle minerIDs
-	reassignQ  *ChunkQ
-}
-
-// initialize
-func NewFCFS(srv lsp.Server) *FCFS {
-	return &FCFS{
-		server:     srv,
-		miners:     make(map[int]*Miner),
-		jobs:       make(map[int]*Job),
-		idleMiners: make([]int, 0),
-		reassignQ:  &ChunkQ{},
+// create a new scheduler
+func NewScheduler(srv lsp.Server) *Scheduler {
+	return &Scheduler{
+		server: srv,
+		miners: make(map[int]*Miner),
+		jobs:   make(map[int]*Job),
 	}
 }
 
-// add a new miner when a join message is recieved
-func (fcfs *FCFS) AddMiner(minerID int) {
+// Miner Management ________________________________________________________________
+
+// create and add a new miner to internal data structures
+// called when when a join message is recieved from miner
+func (scheduler *Scheduler) AddMiner(minerID int) {
 	miner := NewMiner(minerID)
-	fcfs.miners[minerID] = miner
-	fcfs.idleMiners = append(fcfs.idleMiners, minerID)
-}
-
-func (fcfs *FCFS) IsMiner(id int) bool {
-	_, minerExist := fcfs.miners[id]
-	return minerExist
-}
-
-func (fcfs *FCFS) MinerDone(minerID int) {
-	fcfs.miners[minerID].currClientID = -1
-	fcfs.idleMiners = append(fcfs.idleMiners, minerID)
+	scheduler.miners[minerID] = miner
 }
 
 // remove a miner when a miner is disconnected
-func (fcfs *FCFS) RemoveMiner(minerID int) {
-	miner := fcfs.miners[minerID]
+// disconnection can happen on read/writes!
+// remove any references from all internal data structures (job.minerMap, scheduler.miners, )
+// if it was busy, return the chunk it was tasked with processing, and the jobID the chunk belongs to
+func (scheduler *Scheduler) RemoveMiner(minerID int) (*Chunk, int) {
+	miner := scheduler.miners[minerID]
+	var chunk *Chunk
+	jobID := -1
+	// if miner is busy, get the chuck assigned to it
 	if miner.Busy() {
-		job, _ := fcfs.GetJob(miner.currClientID)
-		chunk := job.minerMap[minerID]
-		// re-enqueue the chunk
-		//job.pendingChunks.Enqueue(chunk)
-		fcfs.reassignQ.Enqueue(chunk)
+		job, _, _ := scheduler.GetMinersJob(minerID)
+		chunk, _ = job.GetChunkAssignedToMiner(minerID)
+		job.RemoveChunkAssignedToMiner(minerID)
+		jobID = job.clientID
 	}
-	delete(fcfs.miners, minerID)
-	for i, id := range fcfs.idleMiners {
-		if id == minerID {
-			fcfs.idleMiners = append(fcfs.idleMiners[:i], fcfs.idleMiners[i+1:]...)
-			break
+	delete(scheduler.miners, minerID)
+	return chunk, jobID
+}
+
+// iterate through the map and create a slice of idle miners
+// might be expensive, but reduces the overhead of data-sturcture bookkeeping
+func (scheduler *Scheduler) GetIdleMiners() []*Miner {
+	idleMiners := []*Miner{}
+	for _, miner := range scheduler.miners {
+		if !miner.Busy() {
+			idleMiners = append(idleMiners, miner)
 		}
 	}
+	return idleMiners
 }
 
-func (fcfs *FCFS) GetMinersJob(minerID int) (*Job, int, bool) {
-	miner := fcfs.miners[minerID]
-	job, exist := fcfs.GetJob(miner.currClientID)
-	return job, miner.currClientID, exist
+// used to mark a miner as idle and available
+func (scheduler *Scheduler) MinerIdle(minerID int) {
+	scheduler.miners[minerID].currClientID = -1
 }
 
-// add a job to the job list when a client request is recv'd
-func (fcfs *FCFS) AddJob(job *Job) {
-	fcfs.jobs[job.clientID] = job
-	fmt.Printf("[AddJob] connID: %d\n", job.clientID)
-
+// checks if an id is a miner, if false => is a client
+// used to diffrentiate between dropped connections
+func (scheduler *Scheduler) IsMiner(id int) bool {
+	_, minerExist := scheduler.miners[id]
+	return minerExist
 }
 
-func (fcfs *FCFS) GetJob(clientID int) (*Job, bool) {
-	fmt.Printf("[GetJob] connID: %d\n", clientID)
-	job, exist := fcfs.jobs[clientID]
+// Job Management __________________________________________________________________
+
+// add a job to the job list,
+// called when a a client request is recv'd
+func (scheduler *Scheduler) AddJob(job *Job) {
+	scheduler.jobs[job.clientID] = job
+}
+
+// remove a job from the job list
+// called when a job is complete
+func (scheduler *Scheduler) RemoveJob(clientID int) {
+	delete(scheduler.jobs, clientID)
+}
+
+// get a job based on the clientID that created it
+// also returns a bool, true if it exists, false if not
+func (scheduler *Scheduler) GetJob(clientID int) (*Job, bool) {
+	job, exist := scheduler.jobs[clientID]
 	return job, exist
 }
 
-// remove a job from the job list when a job is complete
-func (fcfs *FCFS) RemoveJob(clientID int) {
-	delete(fcfs.jobs, clientID)
+// retreive the job associated with a miner
+// also returns the job, the jobID(clientID) a bool indicating if it is valid
+func (scheduler *Scheduler) GetMinersJob(minerID int) (*Job, int, bool) {
+	miner := scheduler.miners[minerID]
+	job, exist := scheduler.GetJob(miner.currClientID)
+	return job, miner.currClientID, exist
 }
 
-func (fcfs *FCFS) JobsComplete() bool {
-	return len(fcfs.jobs) == 0
+// no jobs to process
+func (scheduler *Scheduler) JobsComplete() bool {
+	return len(scheduler.jobs) == 0
 }
 
-// fcfs scheduler, false means nothing was scheduled
-func (fcfs *FCFS) ScheduleJobs() bool {
-	if len(fcfs.jobs) == 0 {
-		return false
+// Chunk Management __________________________________________________________________
+
+// attempts to reassign a chunk to a miner
+// returns true if chunk was successfully reassigned
+func (scheduler *Scheduler) ReassignChunk(chunk *Chunk, jobID int) {
+
+	job := scheduler.jobs[jobID]
+	job.pendingChunks.Enqueue(chunk)
+}
+
+// !!!!!!!!!!!!!!!!!!!!!!! [UNVERIFIED]  !!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+// Scheduler scheduler, false means nothing was scheduled
+func (scheduler *Scheduler) ScheduleJobs() {
+
+	idleMiners := scheduler.GetIdleMiners()
+	// nothing to schedule, return
+	if scheduler.JobsComplete() || len(idleMiners) == 0 {
+		fmt.Printf("[Scheduler] nothing to schedule")
+		return
 	}
 
-	for !fcfs.reassignQ.Empty() {
-		if len(fcfs.idleMiners) == 0 {
-			break
-		}
-		reassignChunk, _ := fcfs.reassignQ.Dequeue()
-
-		for len(fcfs.idleMiners) > 0 {
-			minerID := fcfs.idleMiners[0]
-			payload, _ := json.Marshal(reassignChunk.request)
-			err := fcfs.server.Write(minerID, payload)
-			if err == nil {
-				fcfs.idleMiners = fcfs.idleMiners[1:]
-				break
-			}
-			fcfs.RemoveMiner(minerID)
-		}
-	}
-
-	// earliest job
+	// earliest job based on remaining processing time
 	jobQ := NewPQ()
-	for _, job := range fcfs.jobs {
+	for _, job := range scheduler.jobs {
 		jobQ.Insert(job)
 	}
-
 	currJob, _ := jobQ.RemoveMin()
-
-	// for _, miner := range fcfs.miners {
-	// 	if !miner.Busy() {
-	// 		exist, err := currJob.AssignToMiner(miner.minerID)
-	// 		// pendingChunks is empty
-	// 		if !exist && err == nil {
-	// 			newJob, err := jobQ.RemoveMin()
-	// 			if err != nil {
-	// 				return true
-	// 			}
-	// 			currJob = newJob
-	// 		} else if err != nil {
-	// 			// miner is lost
-	// 			fcfs.RemoveMiner(miner.minerID)
-	// 		}
-	// 	}
-	// }
-
-	for len(fcfs.idleMiners) > 0 && !fcfs.JobsComplete() {
-		minerID := fcfs.idleMiners[0]
-		exist, err := currJob.AssignToMiner(minerID)
+	for len(idleMiners) > 0 && !scheduler.JobsComplete() {
+		minerID := idleMiners[0].minerID
+		exist, err := currJob.AssignChunkToMiner(minerID)
 
 		if exist {
-			fcfs.miners[minerID].currClientID = currJob.clientID
+			scheduler.miners[minerID].currClientID = currJob.clientID
+			fmt.Printf("[Scheduler]: [Miner %d] assigned to [Client %d]\n", minerID, currJob.clientID)
 		}
 
 		// pendingChunks is empty
 		if !exist && err == nil {
 			newJob, err := jobQ.RemoveMin()
 			if err != nil {
-				return true
+				return
 			}
 			currJob = newJob
 		} else if err != nil {
 			// miner is lost
-			fcfs.RemoveMiner(minerID)
+			scheduler.RemoveMiner(minerID)
 		}
-		fcfs.idleMiners = fcfs.idleMiners[1:]
+		idleMiners = idleMiners[1:]
 	}
-
-	return true
 }
 
+// Data Structures ______________________________________________________________________
 // RunningStats  ________________________________________________________________________
 // A data structure that keeps track of the running mean
 // and standard deviation based on the Welford's algorithm.

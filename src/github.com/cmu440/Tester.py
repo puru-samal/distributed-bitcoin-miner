@@ -228,10 +228,10 @@ def main(num_clients, num_miners, min_nonce, max_nonce, min_latency, max_latency
 
 
 if __name__ == "__main__":
-    main(num_clients=200, 
-         num_miners=50, 
-         min_nonce=100000, 
-         max_nonce=100000,
+    main(num_clients=1, 
+         num_miners=1, 
+         min_nonce=10000, 
+         max_nonce=10000,
          min_latency=0, 
          max_latency=0, 
          client_startp=1.0, 
