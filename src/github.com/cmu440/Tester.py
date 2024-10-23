@@ -85,6 +85,11 @@ def start_client(client_args):
     client_process = subprocess.Popen(client_args, stdout=subprocess.PIPE)
     return client_process
 
+def stest5_load_balancing_3Miners():
+    pass
+
+
+
 
 def main(num_clients, num_miners, min_nonce, max_nonce, min_latency, max_latency, client_startp, client_dropp, miner_startp, miner_dropp):
     """
@@ -226,8 +231,9 @@ def main(num_clients, num_miners, min_nonce, max_nonce, min_latency, max_latency
     server_process.terminate()
 
 
-
 if __name__ == "__main__":
+
+    # Basic Test
     main(num_clients=1, 
          num_miners=1, 
          min_nonce=10000, 

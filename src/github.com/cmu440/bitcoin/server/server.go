@@ -162,14 +162,13 @@ func (srv *server) processor() {
 
 			LOGF.Printf("[Server] Miner[id %d] result:%s\n", config.connID, config.message)
 			minerID := config.connID
-			srv.scheduler.MinerIdle(minerID) // Mark the Miner as Idle
 
 			// if a job exists
 			// if a client disconnects, a job should have been removed,
 			// in this case exist will return false and the result will be ignored
 			job, clientID, exist := srv.scheduler.GetMinersJob(minerID)
 			if exist {
-
+				job.RemoveChunkAssignedToMiner(minerID)
 				// update client's minNonce, minHash
 				job.ProcessResult(minerID, config.message)
 				currMinHash, currMinNonce := job.GetCurrResult()
@@ -189,6 +188,7 @@ func (srv *server) processor() {
 			} else {
 				LOGF.Printf("[Server] GetMinersJob exist==False\n")
 			}
+			srv.scheduler.MinerIdle(minerID) // Mark the Miner as Idle
 		}
 	}
 }
