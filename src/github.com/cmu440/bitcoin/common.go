@@ -290,7 +290,6 @@ func (scheduler *Scheduler) ScheduleJobs() {
 	idleMiners := scheduler.GetIdleMiners()
 	// nothing to schedule, return
 	if scheduler.JobsComplete() || len(idleMiners) == 0 {
-		fmt.Printf("[Scheduler] nothing to schedule")
 		return
 	}
 

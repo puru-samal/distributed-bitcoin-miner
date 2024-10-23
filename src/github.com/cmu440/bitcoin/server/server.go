@@ -186,6 +186,8 @@ func (srv *server) processor() {
 					LOGF.Printf("[Final Stat]: %f %f\n", mean, dev)
 				}
 				srv.scheduler.ScheduleJobs()
+			} else {
+				LOGF.Printf("[Server] GetMinersJob exist==False\n")
 			}
 		}
 	}
