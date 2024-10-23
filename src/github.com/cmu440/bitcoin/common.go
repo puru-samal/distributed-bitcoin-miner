@@ -82,7 +82,7 @@ func (job *Job) RemoveChunkAssignedToMiner(minerID int) {
 }
 
 func (job *Job) String() string {
-	result := fmt.Sprintf("[job %d] nchunks:%d, pending:%d, proc: %d",
+	result := fmt.Sprintf("[job %d] nchunks:%d, pending:%d, proc: %d\n",
 		job.clientID, job.nChunks,
 		len(job.pendingChunks.chunks),
 		len(job.minerMap))
@@ -165,7 +165,7 @@ func (w *Miner) Busy() bool {
 }
 
 func (miner *Miner) String() string {
-	result := fmt.Sprintf("[Miner %d] job:%d", miner.minerID, miner.currClientID)
+	result := fmt.Sprintf("[Miner %d] job:%d\n", miner.minerID, miner.currClientID)
 	return result
 }
 
@@ -272,6 +272,22 @@ func (scheduler *Scheduler) JobsComplete() bool {
 	return len(scheduler.jobs) == 0
 }
 
+func (scheduler *Scheduler) PrintAllJobs() {
+	fmt.Printf("[Scheduler] Print All Jobs\n")
+	for _, job := range scheduler.jobs {
+		result := job.String()
+		fmt.Println(result)
+	}
+}
+
+func (scheduler *Scheduler) PrintAllMiners() {
+	fmt.Printf("[Scheduler] Print All Miners\n")
+	for _, miner := range scheduler.miners {
+		result := miner.String()
+		fmt.Println(result)
+	}
+}
+
 // Chunk Management __________________________________________________________________
 
 // attempts to reassign a chunk to a miner
@@ -293,6 +309,10 @@ func (scheduler *Scheduler) ScheduleJobs() {
 		fmt.Printf("[Scheduler] nothing to schedule")
 		return
 	}
+
+	fmt.Printf("[Scheduler] Before Scheduling Jobs\n")
+	scheduler.PrintAllJobs()
+	scheduler.PrintAllMiners()
 
 	// earliest job based on remaining processing time
 	jobQ := NewPQ()
@@ -321,6 +341,10 @@ func (scheduler *Scheduler) ScheduleJobs() {
 		}
 		idleMiners = idleMiners[1:]
 	}
+
+	fmt.Printf("[Scheduler] After Scheduling Jobs\n")
+	scheduler.PrintAllJobs()
+	scheduler.PrintAllMiners()
 }
 
 // Data Structures ______________________________________________________________________
