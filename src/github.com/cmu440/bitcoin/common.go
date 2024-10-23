@@ -23,11 +23,6 @@ func (c *Chunk) GetSize() uint64 {
 	return c.request.Upper - c.request.Lower + 1
 }
 
-func (c *Chunk) String() string {
-	result := fmt.Sprintf("Chunk:[min:%d  max:%d]", c.request.Lower, c.request.Upper)
-	return result
-}
-
 // Job  _________________________________________________________________________________
 // A job is essentially a collection of chunks
 type Job struct {
@@ -84,6 +79,14 @@ func (job *Job) GetChunkAssignedToMiner(minerID int) (*Chunk, bool) {
 
 func (job *Job) RemoveChunkAssignedToMiner(minerID int) {
 	delete(job.minerMap, minerID)
+}
+
+func (job *Job) String() string {
+	result := fmt.Sprintf("[job %d] nchunks:%d, pending:%d, proc: %d",
+		job.clientID, job.nChunks,
+		len(job.pendingChunks.chunks),
+		len(job.minerMap))
+	return result
 }
 
 // assigns a job to a miner
@@ -159,6 +162,11 @@ func NewMiner(minerID int) *Miner {
 
 func (w *Miner) Busy() bool {
 	return w.currClientID != -1
+}
+
+func (miner *Miner) String() string {
+	result := fmt.Sprintf("[Miner %d] job:%d", miner.minerID, miner.currClientID)
+	return result
 }
 
 // Scheduler  ______________________________________________________________________
@@ -298,7 +306,6 @@ func (scheduler *Scheduler) ScheduleJobs() {
 
 		if exist {
 			scheduler.miners[minerID].currClientID = currJob.clientID
-			fmt.Printf("[Scheduler]: [Miner %d] assigned to [Client %d]\n", minerID, currJob.clientID)
 		}
 
 		// pendingChunks is empty
