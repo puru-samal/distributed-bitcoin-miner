@@ -319,10 +319,12 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 	// earliest job based on remaining processing time
 	jobQ := NewPQ()
 	for _, job := range scheduler.jobs {
+		logger.Printf("1\n")
 		jobQ.Insert(job)
 	}
 	currJob, _ := jobQ.RemoveMin()
 	for len(idleMiners) > 0 && !scheduler.JobsComplete() {
+		logger.Printf("2\n")
 		minerID := idleMiners[0].minerID
 		chunkExist, minerDropped := currJob.AssignChunkToMiner(minerID)
 
@@ -331,7 +333,7 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 		}
 		// pendingChunks is empty
 		if !chunkExist && minerDropped == nil {
-
+			logger.Printf("3\n")
 			newJob, err := jobQ.RemoveMin()
 			if err != nil {
 				logger.Printf("[Scheduler] Miner available but no more jobs to schedule \n")
@@ -342,6 +344,7 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 			}
 			currJob = newJob
 		}
+		logger.Printf("4\n")
 		// miner has been lost: remove
 		if minerDropped != nil {
 			// miner is lost
@@ -351,6 +354,7 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 		if idleMiners[0].Busy() {
 			idleMiners = idleMiners[1:]
 		}
+		logger.Printf("5\n")
 	}
 
 	logger.Printf("[Scheduler] After Scheduling Jobs\n")
@@ -550,13 +554,46 @@ func (pq *jobTimeQ) minHeapifyDown(idx int) {
 	if !pq.isValidIdx(idx) {
 		return
 	}
+
 	lch := pq.leftChild(idx)
 	rch := pq.rightChild(idx)
 	minIdx := idx
 
-	// prioritize based on the shortest pendingChunks
-	// if the pendingChunks are equal, prioritize based on the size of the chunk
-	if pq.isValidIdx(lch) && pq.q[minIdx].GetPendingChunks() > pq.q[lch].GetPendingChunks() {
+	if pq.isValidIdx(lch) {
+		if pq.q[minIdx].maxNonce > pq.q[lch].maxNonce {
+			// Priority1: maxNonce  
+			minIdx = lch
+		} else if pq.q[minIdx].maxNonce == pq.q[lch].maxNonce {  
+			if pq.q[minIdx].GetPendingChunks() > pq.q[lch].GetPendingChunks() {
+				// Priority2: #pendingChunks
+				minIdx = lch
+			} else if pq.q[minIdx].GetPendingChunks() == pq.q[lch].GetPendingChunks() {
+				if pq.q[minIdx].startTime.Compare(pq.q[lch].startTime) == 1 {
+					// Priority3: jobStartTime
+					minIdx = lch
+				} 
+			}
+		}
+	}
+
+	if pq.isValidIdx(rch) {
+		if pq.q[minIdx].maxNonce > pq.q[rch].maxNonce {
+			// Priority1: maxNonce  
+			minIdx = rch
+		} else if pq.q[minIdx].maxNonce == pq.q[rch].maxNonce {  
+			if pq.q[minIdx].GetPendingChunks() > pq.q[rch].GetPendingChunks() {
+				// Priority2: #pendingChunks
+				minIdx = rch
+			} else if pq.q[minIdx].GetPendingChunks() == pq.q[rch].GetPendingChunks() {
+				if pq.q[minIdx].startTime.Compare(pq.q[rch].startTime) == 1 {
+					// Priority3: jobStartTime
+					minIdx = rch
+				} 
+			}
+		}
+	}
+
+	/* if pq.isValidIdx(lch) && pq.q[minIdx].GetPendingChunks() > pq.q[lch].GetPendingChunks() {
 		minIdx = lch
 	} else if pq.isValidIdx(lch) && pq.q[minIdx].GetPendingChunks() == pq.q[lch].GetPendingChunks() && pq.q[minIdx].startTime.Compare(pq.q[lch].startTime) == 1 {
 		minIdx = lch
@@ -565,7 +602,7 @@ func (pq *jobTimeQ) minHeapifyDown(idx int) {
 		minIdx = rch
 	} else if pq.isValidIdx(rch) && pq.q[minIdx].GetPendingChunks() == pq.q[rch].GetPendingChunks() && pq.q[minIdx].startTime.Compare(pq.q[rch].startTime) == 1 {
 		minIdx = rch
-	}
+	} */
 
 	// prioritize based on the earliest startTime
 	// if pq.isValidIdx(lch) && pq.q[minIdx].startTime.Compare(pq.q[lch].startTime) == 1 {
@@ -592,18 +629,36 @@ func (pq *jobTimeQ) minHeapifyUp(idx int) {
 	p := pq.parent(idx)
 	maxIdx := idx
 
+	if pq.isValidIdx(p) {
+		if pq.q[maxIdx].maxNonce < pq.q[p].maxNonce {
+			// Priority1: maxNonce  
+			maxIdx = p
+		} else if pq.q[maxIdx].maxNonce == pq.q[p].maxNonce {  
+			if pq.q[maxIdx].GetPendingChunks() < pq.q[p].GetPendingChunks() {
+				// Priority2: #pendingChunks
+				maxIdx = p
+			} else if pq.q[maxIdx].GetPendingChunks() == pq.q[p].GetPendingChunks() {
+				if pq.q[maxIdx].startTime.Compare(pq.q[p].startTime) == -1 {
+					// Priority3: jobStartTime
+					maxIdx = p
+				} 
+			}
+		}
+	}
+
 	// prioritize based on the shortest pendingChunks
 	// if the pendingChunks are equal, prioritize based on the size of the chunk
-	if pq.isValidIdx(p) && pq.q[maxIdx].GetPendingChunks() < pq.q[p].GetPendingChunks() {
+	/* if pq.isValidIdx(p) && pq.q[maxIdx].GetPendingChunks() < pq.q[p].GetPendingChunks() {
 		maxIdx = p
 	} else if pq.isValidIdx(p) && pq.q[maxIdx].GetPendingChunks() == pq.q[p].GetPendingChunks() && pq.q[maxIdx].startTime.Compare(pq.q[p].startTime) == -1 {
 		maxIdx = p
-	}
+	} */
 
 	// prioritize based on the earliest startTime
 	// if pq.isValidIdx(p) && pq.q[maxIdx].startTime.Compare(pq.q[p].startTime) == -1 {
 	// 	maxIdx = p
 	// }
+	
 	if maxIdx != idx {
 		tmp := pq.q[idx]
 		pq.q[idx] = pq.q[maxIdx]
