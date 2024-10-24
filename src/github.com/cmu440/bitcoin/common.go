@@ -202,11 +202,11 @@ func (scheduler *Scheduler) AddMiner(minerID int) {
 // remove any references from all internal data structures (job.minerMap, scheduler.miners, )
 // if it was busy, return the chunk it was tasked with processing, and the jobID the chunk belongs to
 func (scheduler *Scheduler) RemoveMiner(minerID int) (*Chunk, int) {
-	miner := scheduler.miners[minerID]
+	miner, exist := scheduler.miners[minerID]
 	var chunk *Chunk
 	jobID := -1
 	// if miner is busy, get the chuck assigned to it
-	if miner.Busy() {
+	if exist && miner.Busy() {
 		job, _, _ := scheduler.GetMinersJob(minerID)
 		chunk, _ = job.GetChunkAssignedToMiner(minerID)
 		job.RemoveChunkAssignedToMiner(minerID)
@@ -308,6 +308,7 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 	idleMiners := scheduler.GetIdleMiners()
 	// nothing to schedule, return
 	if scheduler.JobsComplete() || len(idleMiners) == 0 {
+		logger.Printf("[Scheduler] JobsComplete || No idleMiners\n")
 		return
 	}
 
@@ -320,7 +321,6 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 	for _, job := range scheduler.jobs {
 		jobQ.Insert(job)
 	}
-
 	currJob, _ := jobQ.RemoveMin()
 	for len(idleMiners) > 0 && !scheduler.JobsComplete() {
 		minerID := idleMiners[0].minerID
@@ -331,13 +331,17 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 		}
 		// pendingChunks is empty
 		if !chunkExist && minerDropped == nil {
+
 			newJob, err := jobQ.RemoveMin()
 			if err != nil {
+				logger.Printf("[Scheduler] Miner available but no more jobs to schedule \n")
+				logger.Printf("[Scheduler] After Scheduling Jobs\n")
+				scheduler.PrintAllJobs(logger)
+				scheduler.PrintAllMiners(logger)
 				return
 			}
 			currJob = newJob
 		}
-
 		// miner has been lost: remove
 		if minerDropped != nil {
 			// miner is lost
@@ -554,12 +558,12 @@ func (pq *jobTimeQ) minHeapifyDown(idx int) {
 	// if the pendingChunks are equal, prioritize based on the size of the chunk
 	if pq.isValidIdx(lch) && pq.q[minIdx].GetPendingChunks() > pq.q[lch].GetPendingChunks() {
 		minIdx = lch
-	} else if pq.isValidIdx(lch) && pq.q[minIdx].GetPendingChunks() == pq.q[lch].GetPendingChunks() && pq.q[minIdx].pendingChunks.Peek().GetSize() > pq.q[lch].pendingChunks.Peek().GetSize() {
+	} else if pq.isValidIdx(lch) && pq.q[minIdx].GetPendingChunks() == pq.q[lch].GetPendingChunks() && pq.q[minIdx].startTime.Compare(pq.q[lch].startTime) == 1 {
 		minIdx = lch
 	}
 	if pq.isValidIdx(rch) && pq.q[minIdx].GetPendingChunks() > pq.q[rch].GetPendingChunks() {
 		minIdx = rch
-	} else if pq.isValidIdx(rch) && pq.q[minIdx].GetPendingChunks() == pq.q[rch].GetPendingChunks() && pq.q[minIdx].pendingChunks.Peek().GetSize() > pq.q[rch].pendingChunks.Peek().GetSize() {
+	} else if pq.isValidIdx(rch) && pq.q[minIdx].GetPendingChunks() == pq.q[rch].GetPendingChunks() && pq.q[minIdx].startTime.Compare(pq.q[rch].startTime) == 1 {
 		minIdx = rch
 	}
 
@@ -592,7 +596,7 @@ func (pq *jobTimeQ) minHeapifyUp(idx int) {
 	// if the pendingChunks are equal, prioritize based on the size of the chunk
 	if pq.isValidIdx(p) && pq.q[maxIdx].GetPendingChunks() < pq.q[p].GetPendingChunks() {
 		maxIdx = p
-	} else if pq.isValidIdx(p) && pq.q[maxIdx].GetPendingChunks() == pq.q[p].GetPendingChunks() && pq.q[maxIdx].pendingChunks.Peek().GetSize() < pq.q[p].pendingChunks.Peek().GetSize() {
+	} else if pq.isValidIdx(p) && pq.q[maxIdx].GetPendingChunks() == pq.q[p].GetPendingChunks() && pq.q[maxIdx].startTime.Compare(pq.q[p].startTime) == -1 {
 		maxIdx = p
 	}
 
