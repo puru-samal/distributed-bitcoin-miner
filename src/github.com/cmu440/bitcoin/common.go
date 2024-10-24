@@ -324,13 +324,13 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 	currJob, _ := jobQ.RemoveMin()
 	for len(idleMiners) > 0 && !scheduler.JobsComplete() {
 		minerID := idleMiners[0].minerID
-		exist, err := currJob.AssignChunkToMiner(minerID)
+		chunkExist, minerDropped := currJob.AssignChunkToMiner(minerID)
 
-		if exist && err == nil {
+		if chunkExist && minerDropped == nil {
 			scheduler.miners[minerID].currClientID = currJob.clientID
 		}
 		// pendingChunks is empty
-		if !exist && err == nil {
+		if !chunkExist && minerDropped == nil {
 			newJob, err := jobQ.RemoveMin()
 			if err != nil {
 				return
@@ -339,12 +339,14 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 		}
 
 		// miner has been lost: remove
-		if err != nil {
+		if minerDropped != nil {
 			// miner is lost
 			scheduler.RemoveMiner(minerID)
 		}
 
-		idleMiners = idleMiners[1:]
+		if idleMiners[0].Busy() {
+			idleMiners = idleMiners[1:]
+		}
 	}
 
 	logger.Printf("[Scheduler] After Scheduling Jobs\n")

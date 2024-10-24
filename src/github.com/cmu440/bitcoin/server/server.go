@@ -181,14 +181,11 @@ func (srv *server) processor() {
 					job.ProcessComplete()
 					srv.scheduler.RemoveJob(clientID)
 					mean, dev := srv.rStats.GetStats()
-					fmt.Printf("[Final Stat]: %f %f\n", mean, dev)
 					LOGF.Printf("[Final Stat]: %f %f\n", mean, dev)
 				}
-				srv.scheduler.ScheduleJobs(LOGF)
-			} else {
-				LOGF.Printf("[Server] GetMinersJob exist==False\n")
 			}
 			srv.scheduler.MinerIdle(minerID) // Mark the Miner as Idle
+			srv.scheduler.ScheduleJobs(LOGF)
 		}
 	}
 }

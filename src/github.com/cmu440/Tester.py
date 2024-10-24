@@ -320,15 +320,13 @@ def basicTest():
      GenTest(
         num_clients=1,
         num_miners=1,
-        min_nonce=9999,
-        max_nonce=9999,
+        nonces=[9999],
         min_latency=0,
         max_latency=0,
-        client_startp=1.0,
+        client_startp=0.0,
         client_dropp=0.0,
-        miner_startp=1.0,
+        miner_startp=0.0,
         miner_dropp=0.0,
-        restart=True,
     )
 
 def multiple_requests_requests_miners_killed(num_miners, client_dropp, miner_dropp):
@@ -349,7 +347,7 @@ if __name__ == "__main__":
    
     #basicTest()
     #stest5_load_balancing_3Miners()
-    multiple_requests_requests_miners_killed(num_miners=3, client_dropp=0.75, miner_dropp=0.55)
+    #multiple_requests_requests_miners_killed(num_miners=3, client_dropp=0.75, miner_dropp=0.55)
     '''
     main(
         num_clients=4,
