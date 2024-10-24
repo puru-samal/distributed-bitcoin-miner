@@ -109,6 +109,56 @@ func (srv *server) reader() {
 	}
 }
 
+/*
+Cases of Removing/Adding/Referening
+1. Disconnected
+	*** schedulers.miners map is a map of miners ***
+	- [srv.scheduler.IsMiner] If Miner: Remove the miner and Reassign
+		- [srv.scheduler.RemoveMiner] Remove Miner and returns the chunk and the jobID(currClientID) of the miner
+			- Get the miner from scheduler.miners (config.connID is the minerID)
+			- If the miner exists in the scheduler.miners and is Busy() (has a currClientID that is not -1)
+				- [scheduler.GetMinersJob] Get Miner's Job, ClientID, Exist (If the minerID exists in the scheduler.jobs)
+					- [scheduler.GetJob] Get Job of the miner's currClientID from scheduler.jobs
+				- [job.GetChunkAssignedToMiner] Get the chunk assigned to the miner from the job.minerMap
+				- [job.RemoveChunkAssignedToMiner] Remove the minerID from the job.minerMap
+			- If the miner exists in the scheduler.miners and is Idle() (has a currClientID that is -1)
+		- [srv.scheduler.ReassignChunk] Reassign Chunk
+	- [srv.scheduler.RemoveJob] If Client: Remove the client from scheduler.jobs (PASS)
+2. Join
+	- [srv.scheduler.AddMiner] Add Miner (PASS)
+	- [srv.scheduler.ScheduleJobs] Schedule Jobs
+		- [scheduler.GetIdleMiners] Get Idle Miners
+		- [NewPQ] Create a new Priority Queue of Jobs from the scheduler.Jobs
+		- [jobQ.RemoveMin] Remove the first elements from the Priority Queue
+		- If the idleMiner exists and the scheduler.jobs is not empty
+			- pop the first idleMiner and assign it to be minerID
+			- [currJob.AssignChunkToMine] Assign the first chunk of the job's pendingChunks to the miner
+			- If there is a chunkExists and the miner did not Drop
+				- assign the minerID's currClientID to the job's clientID
+			- If there is no chunkExists and the miner did not Drop
+				- [jobQ.RemoveMin] Remove the next element from the Priority Queue
+				- Update the current job to be the next element
+			- If the miner Drop
+				- [scheduler.RemoveMiner] Remove the minerID from the scheduler.miners
+			- If the miner is properly assigned a job
+				- remove it from the idleMiners
+3. Request
+	- [bitcoin.NewJob] Make New Job (PASS)
+	- [srv.scheduler.AddJob] Add Job (PASS)
+	- [srv.scheduler.ScheduleJobs] Schedule Jobs
+4. Result
+	- [srv.scheduler.GetMinersJob] Get Miner's Job, ClientID, Exist If the minerID exists in the scheduler.jobs)
+		- [scheduler.GetJob] Get Job of the miner's currClientID from scheduler.jobs
+	- If the job exists in the scheduler.jobs
+		- [job.RemoveChunkAssignedToMiner] Remove the minerID from the job.minerMap
+		- [job.ProcessResult] Comparison of the current minHash and minNonce with the miner's result (PASS)
+		- [job.Complete] If Complete: Job's pendingChunks and the minerMap is empty (PASS)
+			- [job.ProcessComplete] send the result of the job to the client
+			- [srv.scheduler.RemoveJob] Remove the clientID from the scheduler.jobs (PASS)
+	- [srv.scheduler.MinerIdle] Mark the miner's currClientID as -1; idle
+	- [srv.scheduler.ScheduleJobs] Schedule Jobs
+*/
+
 func (srv *server) processor() {
 	for {
 		config := <-srv.configureChan

@@ -79,6 +79,10 @@ func (job *Job) GetChunkAssignedToMiner(minerID int) (*Chunk, bool) {
 }
 
 func (job *Job) RemoveChunkAssignedToMiner(minerID int) {
+	// [+Assumption] minerID was working on the chunk of the job
+	// 1) in RemoveMiner: it already checks if the minerID is in the minerMap
+	// 2) when the miner returns a result
+	// only the miner who was assigned the chunk can return result
 	delete(job.minerMap, minerID)
 }
 
@@ -128,7 +132,13 @@ func (job *Job) ProcessResult(minerID int, minerResult *Message) {
 func (job *Job) ProcessComplete() {
 	result := NewResult(job.minHash, job.minNonce)
 	rpayload, _ := json.Marshal(result)
-	job.server.Write(job.clientID, rpayload)
+	err := job.server.Write(job.clientID, rpayload)
+	//[+Assumption] if error occurs while writing to the client
+	// it should cease working on any requests being done on behalf of the client
+	// ignore the result
+	if err != nil {
+		fmt.Printf("[ProcessComplete] Error while writing to the client; Ignore the result\n")
+	}
 }
 
 // condition for when a job is considered to be complete
@@ -204,15 +214,33 @@ func (scheduler *Scheduler) AddMiner(minerID int) {
 func (scheduler *Scheduler) RemoveMiner(minerID int) (*Chunk, int) {
 	miner, exist := scheduler.miners[minerID]
 	var chunk *Chunk
+	var chunkExist bool
 	jobID := -1
 	// if miner is busy, get the chuck assigned to it
 	if exist && miner.Busy() {
-		job, _, _ := scheduler.GetMinersJob(minerID)
-		chunk, _ = job.GetChunkAssignedToMiner(minerID)
+		job, _, jobExist := scheduler.GetMinersJob(minerID)
+		// [+Assumption] job exists in scheduler.jobs
+		if !jobExist {
+			fmt.Printf("[RemoveMiner] Job does not exist in scheduler.jobs\n")
+			return nil, -1
+		}
+		// [+Assumption] chunk exists in job.minerMap
+
+		chunk, chunkExist = job.GetChunkAssignedToMiner(minerID)
+		if !chunkExist {
+			fmt.Printf("[RemoveMiner] Chunk does not exist in job.minerMap\n")
+		}
 		job.RemoveChunkAssignedToMiner(minerID)
+		// assert minerID.currClientID == job.clientID
+		if job.clientID != miner.currClientID {
+			fmt.Printf("[RemoveMiner] MinerID.currClientID != Job.clientID\n")
+		}
 		jobID = job.clientID
 	}
-	delete(scheduler.miners, minerID)
+	// [+Assumption] minerID exists in scheduler.miners
+	if exist {
+		delete(scheduler.miners, minerID)
+	}
 	return chunk, jobID
 }
 
@@ -251,6 +279,10 @@ func (scheduler *Scheduler) AddJob(job *Job) {
 // remove a job from the job list
 // called when a job is complete
 func (scheduler *Scheduler) RemoveJob(clientID int) {
+	// [+Assumption] clientID exists in scheduler.jobs
+	// RemoveJob is done when:
+	// 1. A job is complete
+	// 2. A client is disconnected
 	delete(scheduler.jobs, clientID)
 }
 
@@ -264,6 +296,7 @@ func (scheduler *Scheduler) GetJob(clientID int) (*Job, bool) {
 // retreive the job associated with a miner
 // also returns the job, the jobID(clientID) a bool indicating if it is valid
 func (scheduler *Scheduler) GetMinersJob(minerID int) (*Job, int, bool) {
+	// [+Assumption] minerID exists in scheduler.miners and is Busy()
 	miner := scheduler.miners[minerID]
 	job, exist := scheduler.GetJob(miner.currClientID)
 	return job, miner.currClientID, exist
@@ -321,7 +354,10 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 	for _, job := range scheduler.jobs {
 		jobQ.Insert(job)
 	}
+	// [+Assumption] there's always a job in the jobQ
+	// RemoveMin already checks for the empty condition
 	currJob, _ := jobQ.RemoveMin()
+	// [+Assumption] scheduler.jobs and jobQ do not need to be in sync
 	for len(idleMiners) > 0 && !scheduler.JobsComplete() {
 		minerID := idleMiners[0].minerID
 		chunkExist, minerDropped := currJob.AssignChunkToMiner(minerID)
@@ -329,9 +365,8 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 		if chunkExist && minerDropped == nil {
 			scheduler.miners[minerID].currClientID = currJob.clientID
 		}
-		// pendingChunks is empty
+		// pendingChunks is empty (but might be in process; there are some chunks in minerMap)
 		if !chunkExist && minerDropped == nil {
-
 			newJob, err := jobQ.RemoveMin()
 			if err != nil {
 				logger.Printf("[Scheduler] Miner available but no more jobs to schedule \n")
