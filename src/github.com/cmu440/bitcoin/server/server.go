@@ -104,7 +104,7 @@ func (srv *server) reader() {
 			message:      &message,
 			disconnected: disconnected,
 		}
-		LOGF.Printf("[Server] msg recv'd connID:%d msg:%s\n", config.connID, config.message)
+		//LOGF.Printf("[Server] msg recv'd connID:%d msg:%s\n", config.connID, config.message)
 		srv.configureChan <- config
 	}
 }
@@ -143,7 +143,7 @@ func (srv *server) processor() {
 
 			LOGF.Printf("[Server] Miner[id %d] Joined\n", config.connID)
 			srv.scheduler.AddMiner(config.connID)
-			srv.scheduler.ScheduleJobs()
+			srv.scheduler.ScheduleJobs(LOGF)
 			// TODO: LOG ALL SCHEDULER DATA-STRUCTURES HERE
 
 		} else if config.message.Type == bitcoin.Request {
@@ -155,7 +155,7 @@ func (srv *server) processor() {
 			srv.rStats.StartRecording(config.connID)
 			job := bitcoin.NewJob(srv.lspServer, config.connID, config.message.Data, config.message, bitcoin.ChunkSize)
 			srv.scheduler.AddJob(job)
-			srv.scheduler.ScheduleJobs()
+			srv.scheduler.ScheduleJobs(LOGF)
 			// TODO: PRINT ALL SCHEDULER DATA-STRUCTURES HERE
 
 		} else if config.message.Type == bitcoin.Result {
@@ -172,7 +172,7 @@ func (srv *server) processor() {
 				// update client's minNonce, minHash
 				job.ProcessResult(minerID, config.message)
 				currMinHash, currMinNonce := job.GetCurrResult()
-				LOGF.Printf("[Server] Client[id %d] result: currentMinHash:%d currentMinNonce:%d\n", config.connID, currMinHash, currMinNonce)
+				LOGF.Printf("[Server] Client[id %d] result: currentMinHash:%d currentMinNonce:%d\n", clientID, currMinHash, currMinNonce)
 
 				// If a job is complete, send the result back to the client
 				if job.Complete() {
@@ -184,7 +184,7 @@ func (srv *server) processor() {
 					fmt.Printf("[Final Stat]: %f %f\n", mean, dev)
 					LOGF.Printf("[Final Stat]: %f %f\n", mean, dev)
 				}
-				srv.scheduler.ScheduleJobs()
+				srv.scheduler.ScheduleJobs(LOGF)
 			} else {
 				LOGF.Printf("[Server] GetMinersJob exist==False\n")
 			}

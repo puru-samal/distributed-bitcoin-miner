@@ -87,34 +87,107 @@ def start_client(client_args):
     return client_process
 
 def stest5_load_balancing_3Miners():
-    pass
+    num_clients = 2
+    num_miners  = 3
+    nonces = [999999, 999]
+    messages = [generate_random_message() for _ in range(num_clients)]
+
+    # Compile
+    compile_programs()
+    print(
+        f"[TESTER]: Clients: {num_clients}, Miners: {num_miners}, Nonces: {nonces}, Messages: {messages}"
+    )
+
+    # Start the server process
+    server_process = start_server()
+
+    # generate miner_args, dont start!
+    miner_args = []
+    for i in range(num_miners):
+        miner_args.append(create_miner_args(0))
+
+    # generate random client args, dont start!
+    client_args = []
+    for i in range(num_clients):
+        message = messages[i]
+        nonce = nonces[i]
+        client_args.append(create_client_args(message, nonce))
+
+    running_clients = []
+    running_miners = []
+    active_clients = 0
+    active_miners = 0
+
+    for arg in client_args:
+        print(arg)
+        print("[Starting Client] :", arg)
+        client_process = start_client(arg)
+        running_clients.append(client_process)
+        active_clients += 1
+
+    for arg in miner_args:
+        random_miner_arg = arg
+        print("[Starting Miner] :", arg)
+        miner_process = start_miner(random_miner_arg)
+        running_miners.append(miner_process)
+        active_miners += 1
+
+    while running_clients:
+        for client_process in running_clients:
+            if client_process.poll() is not None:  # Process has finished
+                stdout, stderr = client_process.communicate()  # Capture the output
+                if stdout:
+                    print(f"Output: {stdout.decode().strip()}")
+                if stderr:
+                    print(f"Error: {stderr.decode().strip()}")
+                running_clients.remove(client_process)
+                active_clients -= 1
+                print(
+                    f"[CLIENT]:Process {client_process.pid} finished with return code {client_process.returncode}"
+                )
+
+        for miner_process in running_miners:
+            if miner_process.poll() is not None:  # Process has finished
+                stdout, stderr = miner_process.communicate()  # Capture the output
+                if stdout:
+                    print(f"\033[92mOutput: {stdout.decode().strip()}\033[0m")
+                if stderr:
+                    print(f"\033[31mError: {stderr.decode().strip()}\033[0m")
+                running_miners.remove(miner_process)
+                active_miners -= 1
+                print(
+                    f"[MINER]:Process {miner_process.pid} finished with return code {miner_process.returncode}"
+                )
+
+        print("[Active Clients]: ", active_clients)
+        print("[Active Miners] : ", active_miners)
+
+    # Cleanup: Stop server and miners
+    print("[TESTER]: Stopping processes...")
+    if len(running_miners) != 0:
+        for miner_process in running_miners:
+            miner_process.terminate()
+
+    server_process.terminate()
 
 
-
-
-def main(
+def GenTest(
     num_clients,
     num_miners,
-    min_nonce,
-    max_nonce,
+    nonces,
     min_latency,
     max_latency,
     client_startp,
     client_dropp,
     miner_startp,
     miner_dropp,
-    restart,
 ):
     """
     Main function to orchestrate the steps.
     """
-
-    # Generate random nonces and messages for each client
-    nonces = [generate_random_nonce(min_nonce, max_nonce) for _ in range(num_clients)]
+    assert len(nonces) == num_clients
     messages = [generate_random_message() for _ in range(num_clients)]
-    latencies = [
-        generate_random_latency(min_latency, max_latency) for _ in range(num_miners)
-    ]
+    latencies = [generate_random_latency(min_latency, max_latency) for _ in range(num_miners)]
 
     # Compile
     compile_programs()
@@ -137,15 +210,13 @@ def main(
         nonce = nonces[i]
         client_args.append(create_client_args(message, nonce))
 
-    running_clients = []
-    running_miners = []
-    active_clients = 0
-    active_miners = 0
 
-    print(len(client_args))
+    running_clients = []
+    running_miners  = []
+    active_clients  = 0
+    active_miners   = 0
 
     for arg in client_args:
-        print(arg)
         print("[Starting Client] :", arg)
         client_process = start_client(arg)
         running_clients.append(client_process)
@@ -158,25 +229,22 @@ def main(
         running_miners.append(miner_process)
         active_miners += 1
 
-    t = 0
+    
 
+    t = 0
     # while client_args or running_clients:
     while running_clients:
         t += 1
-        print("t=", t)
 
-        """'
         if random.random() < client_startp:
-            if len(client_args) != 0:
-                random_client_arg = random.choice(client_args)
+            try:
+                random_client_arg = client_args.pop()
                 print("[Starting Client] :", random_client_arg)
                 client_process = start_client(random_client_arg)
-                client_args.remove(random_client_arg)
                 running_clients.append(client_process)
                 active_clients += 1
-            else:
+            except:
                 print("[No Pending Clients to start]")
-        """
 
         if random.random() < client_dropp:
             try:
@@ -188,18 +256,16 @@ def main(
                 print("[No Active Clients]")
                 pass
 
-        """
         if random.random() < miner_startp:
-            if len(miner_args) != 0:
-                random_miner_arg = random.choice(miner_args)
+            try:
+                random_miner_arg = miner_args.pop()
                 print("[Starting Miner] :", random_miner_arg)
                 miner_process = start_miner(random_miner_arg)
                 miner_args.remove(random_miner_arg)
                 running_miners.append(miner_process)
                 active_miners += 1
-            else:
+            except:
                 print("[No Pending Miners to start]")
-        """
 
         if random.random() < miner_dropp:
             try:
@@ -208,10 +274,6 @@ def main(
                 miner_process.terminate()
                 active_miners -= 1
                 print("[Dropping Active Miner]")
-                if restart:
-                    print("[Restarting Miner]")
-                    miner_process = start_miner(miner_process.args)
-                    active_miners += 1
             except:
                 print("[No Active Miners]")
                 pass
@@ -226,7 +288,7 @@ def main(
                 running_clients.remove(client_process)
                 active_clients -= 1
                 print(
-                    f"Process {client_process.pid} finished with return code {client_process.returncode}"
+                    f"[CLIENT]:Process {client_process.pid} finished with return code {client_process.returncode}"
                 )
 
         for miner_process in running_miners:
@@ -239,12 +301,12 @@ def main(
                 running_miners.remove(miner_process)
                 active_miners -= 1
                 print(
-                    f"Process {miner_process.pid} finished with return code {miner_process.returncode}"
+                    f"[MINER]:Process {miner_process.pid} finished with return code {miner_process.returncode}"
                 )
 
         print("[Active Clients]: ", active_clients)
         print("[Active Miners] : ", active_miners)
-        time.sleep(1)
+        time.sleep(0.1)
 
     # Cleanup: Stop server and miners
     print("[TESTER]: Stopping processes...")
@@ -254,18 +316,52 @@ def main(
 
     server_process.terminate()
 
-
-if __name__ == "__main__":
-    main(
+def basicTest():
+     GenTest(
         num_clients=1,
         num_miners=1,
-        min_nonce=10000,
-        max_nonce=10000,
+        min_nonce=9999,
+        max_nonce=9999,
         min_latency=0,
         max_latency=0,
         client_startp=1.0,
         client_dropp=0.0,
         miner_startp=1.0,
         miner_dropp=0.0,
-        restart=False,
+        restart=True,
     )
+
+def multiple_requests_requests_miners_killed(num_miners, client_dropp, miner_dropp):
+    nonces = [99999, 9999, 9999, 9999, 99999, 9999, 999, 9999] 
+    GenTest(num_clients=len(nonces), 
+            num_miners=num_miners, 
+            nonces=nonces, 
+            min_latency=0, 
+            max_latency=0, 
+            client_startp=0.0, 
+            client_dropp=client_dropp, 
+            miner_startp=0.0, 
+            miner_dropp=miner_dropp)
+    
+     
+    
+if __name__ == "__main__":
+   
+    #basicTest()
+    #stest5_load_balancing_3Miners()
+    multiple_requests_requests_miners_killed(num_miners=3, client_dropp=0.75, miner_dropp=0.55)
+    '''
+    main(
+        num_clients=4,
+        num_miners=1,
+        min_nonce=9999,
+        max_nonce=9999,
+        min_latency=0,
+        max_latency=0,
+        client_startp=1.0,
+        client_dropp=0.0,
+        miner_startp=1.0,
+        miner_dropp=1.0,
+        restart=True,
+    )
+    '''

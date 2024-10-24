@@ -3,6 +3,7 @@ package bitcoin
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"time"
 
@@ -105,6 +106,7 @@ func (job *Job) AssignChunkToMiner(minerID int) (bool, error) {
 	error := job.server.Write(minerID, payload)
 	// miner is lost
 	if error != nil {
+		job.pendingChunks.Enqueue(chunk)
 		return true, error
 	}
 	job.minerMap[minerID] = chunk
@@ -272,19 +274,19 @@ func (scheduler *Scheduler) JobsComplete() bool {
 	return len(scheduler.jobs) == 0
 }
 
-func (scheduler *Scheduler) PrintAllJobs() {
-	fmt.Printf("[Scheduler] Print All Jobs\n")
+func (scheduler *Scheduler) PrintAllJobs(logger *log.Logger) {
+	logger.Printf("[Scheduler] Print All Jobs\n")
 	for _, job := range scheduler.jobs {
 		result := job.String()
-		fmt.Println(result)
+		logger.Println(result)
 	}
 }
 
-func (scheduler *Scheduler) PrintAllMiners() {
-	fmt.Printf("[Scheduler] Print All Miners\n")
+func (scheduler *Scheduler) PrintAllMiners(logger *log.Logger) {
+	logger.Printf("[Scheduler] Print All Miners\n")
 	for _, miner := range scheduler.miners {
 		result := miner.String()
-		fmt.Println(result)
+		logger.Println(result)
 	}
 }
 
@@ -301,7 +303,7 @@ func (scheduler *Scheduler) ReassignChunk(chunk *Chunk, jobID int) {
 // !!!!!!!!!!!!!!!!!!!!!!! [UNVERIFIED]  !!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 // Scheduler scheduler, false means nothing was scheduled
-func (scheduler *Scheduler) ScheduleJobs() {
+func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 
 	idleMiners := scheduler.GetIdleMiners()
 	// nothing to schedule, return
@@ -309,24 +311,24 @@ func (scheduler *Scheduler) ScheduleJobs() {
 		return
 	}
 
-	fmt.Printf("[Scheduler] Before Scheduling Jobs\n")
-	scheduler.PrintAllJobs()
-	scheduler.PrintAllMiners()
+	logger.Printf("[Scheduler] Before Scheduling Jobs\n")
+	scheduler.PrintAllJobs(logger)
+	scheduler.PrintAllMiners(logger)
 
 	// earliest job based on remaining processing time
 	jobQ := NewPQ()
 	for _, job := range scheduler.jobs {
 		jobQ.Insert(job)
 	}
+
 	currJob, _ := jobQ.RemoveMin()
 	for len(idleMiners) > 0 && !scheduler.JobsComplete() {
 		minerID := idleMiners[0].minerID
 		exist, err := currJob.AssignChunkToMiner(minerID)
 
-		if exist {
+		if exist && err == nil {
 			scheduler.miners[minerID].currClientID = currJob.clientID
 		}
-
 		// pendingChunks is empty
 		if !exist && err == nil {
 			newJob, err := jobQ.RemoveMin()
@@ -334,16 +336,20 @@ func (scheduler *Scheduler) ScheduleJobs() {
 				return
 			}
 			currJob = newJob
-		} else if err != nil {
+		}
+
+		// miner has been lost: remove
+		if err != nil {
 			// miner is lost
 			scheduler.RemoveMiner(minerID)
 		}
+
 		idleMiners = idleMiners[1:]
 	}
 
-	fmt.Printf("[Scheduler] After Scheduling Jobs\n")
-	scheduler.PrintAllJobs()
-	scheduler.PrintAllMiners()
+	logger.Printf("[Scheduler] After Scheduling Jobs\n")
+	scheduler.PrintAllJobs(logger)
+	scheduler.PrintAllMiners(logger)
 }
 
 // Data Structures ______________________________________________________________________
