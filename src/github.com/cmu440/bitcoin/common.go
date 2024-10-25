@@ -79,6 +79,11 @@ func (job *Job) GetChunkAssignedToMiner(minerID int) (*Chunk, bool) {
 	return chunk, exist
 }
 
+// mark that a miner is processing a chunk: job.minerMap[minerID] = chunk
+func (job *Job) AssignChunkToMiner(minerID int, chunk *Chunk) {
+	job.minerMap[minerID] = chunk
+}
+
 func (job *Job) RemoveChunkAssignedToMiner(minerID int) {
 	// [+Assumption] minerID was working on the chunk of the job
 	// 1) in RemoveMiner: it already checks if the minerID is in the minerMap
@@ -114,6 +119,15 @@ func minerMapString(m map[int]*Chunk) string {
 	return sb.String()
 }
 
+// deque get a pending chunk from a job, exist is false if no pending
+func (job *Job) GetPendingChunk() (*Chunk, bool) {
+	chunk, exist := job.pendingChunks.Dequeue() // Get the first chunk
+	if !exist {
+		return nil, false
+	}
+	return chunk, true
+}
+
 // assigns a job to a miner
 // this involves removing a chunk from a queue
 // if it exists, then moving it to the minerMap
@@ -121,6 +135,7 @@ func minerMapString(m map[int]*Chunk) string {
 // returns true if a chunk exists, false if not
 // returns an nil if a request was sent to miner
 // returns a non-nil error if seding failed for potential reassignment
+/*
 func (job *Job) AssignChunkToMiner(minerID int) (bool, error) {
 	chunk, exist := job.pendingChunks.Dequeue() // Get the first chunk
 	if !exist {
@@ -136,6 +151,7 @@ func (job *Job) AssignChunkToMiner(minerID int) (bool, error) {
 	job.minerMap[minerID] = chunk
 	return true, nil
 }
+*/
 
 // updates minHash and minNonce when a result is recv'd from a miner
 // and then removes the chunk from the minerMap
@@ -173,7 +189,7 @@ func (job *Job) GetCurrResult() (uint64, uint64) {
 }
 
 // for SRTF
-func (job *Job) GetPendingChunks() int {
+func (job *Job) GetNumPendingChunks() int {
 	return job.pendingChunks.Size()
 }
 
@@ -192,13 +208,24 @@ func NewMiner(minerID int) *Miner {
 	return worker
 }
 
-func (w *Miner) Busy() bool {
-	return w.currClientID != -1
+// see if a miner is busy or not: miner.currClientID != -1
+func (miner *Miner) Busy() bool {
+	return miner.currClientID != -1
 }
 
 func (miner *Miner) String() string {
 	result := fmt.Sprintf("[Miner %d] job:%d\n", miner.minerID, miner.currClientID)
 	return result
+}
+
+// mark the miner as processing a job : miner.currClientID = jobID
+func (miner *Miner) AssignMinerToJob(jobID int) {
+	miner.currClientID = jobID
+}
+
+// used to mark a miner as idle and available
+func (miner *Miner) Idle() {
+	miner.currClientID = -1
 }
 
 // Scheduler  ______________________________________________________________________
@@ -278,7 +305,10 @@ func (scheduler *Scheduler) GetIdleMiners() []*Miner {
 
 // used to mark a miner as idle and available
 func (scheduler *Scheduler) MinerIdle(minerID int) {
-	scheduler.miners[minerID].currClientID = -1
+	miner, exist := scheduler.miners[minerID]
+	if exist {
+		miner.Idle()
+	}
 }
 
 // checks if an id is a miner, if false => is a client
@@ -322,7 +352,7 @@ func (scheduler *Scheduler) GetMinersJob(minerID int) (*Job, int, bool) {
 	return job, miner.currClientID, exist
 }
 
-// no jobs to process
+// no jobs to process: len(scheduler.jobs) == 0
 func (scheduler *Scheduler) NoJobs() bool {
 	return len(scheduler.jobs) == 0
 }
@@ -353,56 +383,69 @@ func (scheduler *Scheduler) ReassignChunk(chunk *Chunk, jobID int) {
 	job.pendingChunks.Enqueue(chunk)
 }
 
-// !!!!!!!!!!!!!!!!!!!!!!! [UNVERIFIED]  !!!!!!!!!!!!!!!!!!!!!!!!!!!
-
 // Scheduler scheduler, false means nothing was scheduled
 func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 
-	idleMiners := scheduler.GetIdleMiners()
 	// nothing to schedule, return
-	if scheduler.NoJobs() || len(idleMiners) == 0 {
-		logger.Printf("[Scheduler] No Jobs || No idleMiners\n")
+	if scheduler.NoJobs() {
+		logger.Printf("[Scheduler] No Jobs\n")
 		logger.Printf("[Scheduler]:\n")
 		scheduler.PrintAllJobs(logger)
 		scheduler.PrintAllMiners(logger)
 		return
 	}
 
-	// earliest job based on remaining processing time
+	idleMiners := scheduler.GetIdleMiners()
+	// nothing to schedule, return
+	if len(idleMiners) == 0 {
+		logger.Printf("No idleMiners\n")
+		logger.Printf("[Scheduler]:\n")
+		scheduler.PrintAllJobs(logger)
+		scheduler.PrintAllMiners(logger)
+		return
+	}
+
+	// earliest job based on load balancing strategy
 	jobQ := NewPQ()
 	for _, job := range scheduler.jobs {
 		jobQ.Insert(job)
 	}
 	// [+Assumption] there's always a job in the jobQ
 	// RemoveMin already checks for the empty condition
-	currJob, _ := jobQ.RemoveMin()
 	// [+Assumption] scheduler.jobs and jobQ do not need to be in sync
-	for len(idleMiners) > 0 && !scheduler.NoJobs() {
-		minerID := idleMiners[0].minerID
-		chunkExist, minerDropped := currJob.AssignChunkToMiner(minerID)
+	currJob, _ := jobQ.RemoveMin()
+	for len(idleMiners) > 0 && jobQ.Size() >= 0 {
 
-		if chunkExist && minerDropped == nil {
-			scheduler.miners[minerID].currClientID = currJob.clientID
-		}
-		// pendingChunks is empty (but might be in process; there are some chunks in minerMap)
-		if !chunkExist && minerDropped == nil {
-			newJob, err := jobQ.RemoveMin()
-			if err != nil {
-				logger.Printf("[Scheduler] Miner available but no more jobs to schedule \n")
-				logger.Printf("[Scheduler]:\n")
-				scheduler.PrintAllJobs(logger)
-				scheduler.PrintAllMiners(logger)
-				return
-			}
-			currJob = newJob
-		}
-		// miner has been lost: remove
-		if minerDropped != nil {
+		logger.Printf("[idleMiner]: %s\n", idleMiners[0].String())
+
+		chunk, chunkExists := currJob.GetPendingChunk()
+		logger.Printf("[ChunkExists]: %v\n", chunkExists)
+		if chunkExists {
+			logger.Printf("[Chunk] %s\n", chunk.request)
+			payload, _ := json.Marshal(chunk.request)
+			minerWriteErr := currJob.server.Write(idleMiners[0].minerID, payload)
 			// miner is lost
-			scheduler.RemoveMiner(minerID)
+			if minerWriteErr != nil {
+				scheduler.RemoveMiner(idleMiners[0].minerID)
+				scheduler.ReassignChunk(chunk, currJob.clientID)
+				idleMiners = idleMiners[1:]
+			} else {
+				currJob.AssignChunkToMiner(idleMiners[0].minerID, chunk)
+				idleMiners[0].AssignMinerToJob(currJob.clientID)
+				logger.Printf("[Chunk] Assigned -> %s\n", idleMiners[0].String())
+			}
+		} else {
+			logger.Printf("-> next job\n")
+			nextJob, err := jobQ.RemoveMin()
+			if err != nil {
+				logger.Printf("[Scheduler]: Job has no pending chunks, theres no next job")
+				logger.Printf("[Scheduler]: Nothing to schedule!")
+				break
+			}
+			currJob = nextJob
 		}
-
-		if idleMiners[0].Busy() {
+		if len(idleMiners) > 0 && idleMiners[0].Busy() {
+			logger.Printf("-> next idle miner\n")
 			idleMiners = idleMiners[1:]
 		}
 	}
@@ -610,14 +653,16 @@ func (pq *jobTimeQ) minHeapifyDown(idx int) {
 	minIdx := idx
 
 	if pq.isValidIdx(lch) {
+
 		if pq.q[minIdx].maxNonce > pq.q[lch].maxNonce {
 			// Priority1: maxNonce
 			minIdx = lch
 		} else if pq.q[minIdx].maxNonce == pq.q[lch].maxNonce {
-			if pq.q[minIdx].GetPendingChunks() > pq.q[lch].GetPendingChunks() {
+
+			if pq.q[minIdx].GetNumPendingChunks() > pq.q[lch].GetNumPendingChunks() {
 				// Priority2: #pendingChunks
 				minIdx = lch
-			} else if pq.q[minIdx].GetPendingChunks() == pq.q[lch].GetPendingChunks() {
+			} else if pq.q[minIdx].GetNumPendingChunks() == pq.q[lch].GetNumPendingChunks() {
 				if pq.q[minIdx].startTime.Compare(pq.q[lch].startTime) == 1 {
 					// Priority3: jobStartTime
 					minIdx = lch
@@ -631,10 +676,10 @@ func (pq *jobTimeQ) minHeapifyDown(idx int) {
 			// Priority1: maxNonce
 			minIdx = rch
 		} else if pq.q[minIdx].maxNonce == pq.q[rch].maxNonce {
-			if pq.q[minIdx].GetPendingChunks() > pq.q[rch].GetPendingChunks() {
+			if pq.q[minIdx].GetNumPendingChunks() > pq.q[rch].GetNumPendingChunks() {
 				// Priority2: #pendingChunks
 				minIdx = rch
-			} else if pq.q[minIdx].GetPendingChunks() == pq.q[rch].GetPendingChunks() {
+			} else if pq.q[minIdx].GetNumPendingChunks() == pq.q[rch].GetNumPendingChunks() {
 				if pq.q[minIdx].startTime.Compare(pq.q[rch].startTime) == 1 {
 					// Priority3: jobStartTime
 					minIdx = rch
@@ -642,25 +687,6 @@ func (pq *jobTimeQ) minHeapifyDown(idx int) {
 			}
 		}
 	}
-
-	/* if pq.isValidIdx(lch) && pq.q[minIdx].GetPendingChunks() > pq.q[lch].GetPendingChunks() {
-		minIdx = lch
-	} else if pq.isValidIdx(lch) && pq.q[minIdx].GetPendingChunks() == pq.q[lch].GetPendingChunks() && pq.q[minIdx].startTime.Compare(pq.q[lch].startTime) == 1 {
-		minIdx = lch
-	}
-	if pq.isValidIdx(rch) && pq.q[minIdx].GetPendingChunks() > pq.q[rch].GetPendingChunks() {
-		minIdx = rch
-	} else if pq.isValidIdx(rch) && pq.q[minIdx].GetPendingChunks() == pq.q[rch].GetPendingChunks() && pq.q[minIdx].startTime.Compare(pq.q[rch].startTime) == 1 {
-		minIdx = rch
-	} */
-
-	// prioritize based on the earliest startTime
-	// if pq.isValidIdx(lch) && pq.q[minIdx].startTime.Compare(pq.q[lch].startTime) == 1 {
-	// 	minIdx = lch
-	// }
-	// if pq.isValidIdx(rch) && pq.q[minIdx].startTime.Compare(pq.q[rch].startTime) == 1 {
-	// 	minIdx = rch
-	// }
 
 	if minIdx != idx {
 		tmp := pq.q[idx]
@@ -684,10 +710,10 @@ func (pq *jobTimeQ) minHeapifyUp(idx int) {
 			// Priority1: maxNonce
 			maxIdx = p
 		} else if pq.q[maxIdx].maxNonce == pq.q[p].maxNonce {
-			if pq.q[maxIdx].GetPendingChunks() < pq.q[p].GetPendingChunks() {
+			if pq.q[maxIdx].GetNumPendingChunks() < pq.q[p].GetNumPendingChunks() {
 				// Priority2: #pendingChunks
 				maxIdx = p
-			} else if pq.q[maxIdx].GetPendingChunks() == pq.q[p].GetPendingChunks() {
+			} else if pq.q[maxIdx].GetNumPendingChunks() == pq.q[p].GetNumPendingChunks() {
 				if pq.q[maxIdx].startTime.Compare(pq.q[p].startTime) == -1 {
 					// Priority3: jobStartTime
 					maxIdx = p
@@ -695,19 +721,6 @@ func (pq *jobTimeQ) minHeapifyUp(idx int) {
 			}
 		}
 	}
-
-	// prioritize based on the shortest pendingChunks
-	// if the pendingChunks are equal, prioritize based on the size of the chunk
-	/* if pq.isValidIdx(p) && pq.q[maxIdx].GetPendingChunks() < pq.q[p].GetPendingChunks() {
-		maxIdx = p
-	} else if pq.isValidIdx(p) && pq.q[maxIdx].GetPendingChunks() == pq.q[p].GetPendingChunks() && pq.q[maxIdx].startTime.Compare(pq.q[p].startTime) == -1 {
-		maxIdx = p
-	} */
-
-	// prioritize based on the earliest startTime
-	// if pq.isValidIdx(p) && pq.q[maxIdx].startTime.Compare(pq.q[p].startTime) == -1 {
-	// 	maxIdx = p
-	// }
 
 	if maxIdx != idx {
 		tmp := pq.q[idx]

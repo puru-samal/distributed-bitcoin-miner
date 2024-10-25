@@ -104,7 +104,6 @@ func (srv *server) reader() {
 			message:      &message,
 			disconnected: disconnected,
 		}
-		//LOGF.Printf("[Server] msg recv'd connID:%d msg:%s\n", config.connID, config.message)
 		srv.configureChan <- config
 	}
 }
@@ -185,8 +184,7 @@ func (srv *server) processor() {
 				srv.scheduler.RemoveJob(config.connID)
 			}
 
-		}
-		if config.message.Type == bitcoin.Join {
+		} else if config.message.Type == bitcoin.Join {
 
 			// Add the miner to the scheduler
 			// Miner will be marked as idle

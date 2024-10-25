@@ -101,11 +101,19 @@ def BasicTest(nonces=[9999], latencies=[0], clients_to_start=[0], miners_to_star
     for err in merrs:
         print(err)
 
+def killTests(nonces):
+    pass
+
+
 
 if __name__ == "__main__":
     # Basic1: 1 job, 1 miner, 1 chunk
-    #BasicTest(nonces=[9999], latencies=[0], clients_to_start=[0], miners_to_start=[0])
+    # BasicTest(nonces=[9999], latencies=[0], clients_to_start=[0], miners_to_start=[0])
     # Basic2: 1 job, 1 miner, 10 chunk
-    #BasicTest(nonces=[99999], latencies=[0], clients_to_start=[0], miners_to_start=[0])
+    # BasicTest(nonces=[99999], latencies=[0], clients_to_start=[0], miners_to_start=[0])
     # Basic3: 2 jobs (one small, one large), 1 miner
-    BasicTest(nonces=[999, 99999], latencies=[0], clients_to_start=[0, 1], miners_to_start=[0])
+    # BasicTest(nonces=[999, 99999], latencies=[0], clients_to_start=[0, 1], miners_to_start=[0])
+    # Basic: 4 jobs, 2 miners
+    # BasicTest(nonces=[999, 99999, 9999, 9999], latencies=[0, 0], clients_to_start=[0, 1, 2, 3], miners_to_start=[0, 1])
+      
+      killTests()
