@@ -174,7 +174,9 @@ func (srv *server) processor() {
 				if chunk != nil {
 					srv.scheduler.ReassignChunk(chunk, jobID)
 				}
-
+				// check if the minerID is not in the minerMap and fcfc.miners after disconnect
+				srv.scheduler.PrintAllJobs(LOGF)
+				srv.scheduler.PrintAllMiners(LOGF)
 			} else {
 
 				// if server loses contact with a client

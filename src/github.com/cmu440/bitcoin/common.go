@@ -92,6 +92,14 @@ func (job *Job) RemoveChunkAssignedToMiner(minerID int) {
 	delete(job.minerMap, minerID)
 }
 
+// func (job *Job) String() string {
+// 	result := fmt.Sprintf("[job %d] nchunks:%d, pending:%d, proc: %d\n",
+// 		job.clientID, job.nChunks,
+// 		len(job.pendingChunks.chunks),
+// 		len(job.minerMap))
+// 	return result
+// }
+
 func (job *Job) String() string {
 	var result strings.Builder
 	result.WriteString(fmt.Sprintf("[job %d] nchunks:%d, pending:%d, proc: %d, miner_map:%s\n",
@@ -369,6 +377,14 @@ func (scheduler *Scheduler) PrintAllMiners(logger *log.Logger) {
 	logger.Printf("Miners:\n")
 	for _, miner := range scheduler.miners {
 		result := miner.String()
+		logger.Println(result)
+	}
+}
+
+func (scheduler *Scheduler) PrintAllPQ(logger *log.Logger, pq *jobTimeQ) {
+	logger.Printf("[Scheduler] Print All Jobs in PQ\n")
+	for _, job := range pq.q {
+		result := job.String()
 		logger.Println(result)
 	}
 }
