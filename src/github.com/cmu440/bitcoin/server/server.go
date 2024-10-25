@@ -21,12 +21,14 @@ type server struct {
 	configureChan chan *config
 }
 
+// config for determining the type of message and connection
 type config struct {
 	connID       int
 	message      *bitcoin.Message
 	disconnected bool
 }
 
+// starts a server and returns a pointer to the server
 func startServer(port int) (*server, error) {
 	// TODO: implement this!
 	// start new server
@@ -43,6 +45,7 @@ func startServer(port int) (*server, error) {
 	return server, nil
 }
 
+// variables for logging
 var LOGF *log.Logger
 
 func main() {
@@ -88,6 +91,9 @@ func main() {
 	srv.processor()
 }
 
+// reads messages from the lsp server
+// and sends the message to the processor
+// through a configuration channel (configureChan)
 func (srv *server) reader() {
 
 	for {
@@ -108,61 +114,21 @@ func (srv *server) reader() {
 	}
 }
 
-/*
-Cases of Removing/Adding/Referening
-1. Disconnected
-	*** schedulers.miners map is a map of miners ***
-	- [srv.scheduler.IsMiner] If Miner: Remove the miner and Reassign
-		- [srv.scheduler.RemoveMiner] Remove Miner and returns the chunk and the jobID(currClientID) of the miner
-			- Get the miner from scheduler.miners (config.connID is the minerID)
-			- If the miner exists in the scheduler.miners and is Busy() (has a currClientID that is not -1)
-				- [scheduler.GetMinersJob] Get Miner's Job, ClientID, Exist (If the minerID exists in the scheduler.jobs)
-					- [scheduler.GetJob] Get Job of the miner's currClientID from scheduler.jobs
-				- [job.GetChunkAssignedToMiner] Get the chunk assigned to the miner from the job.minerMap
-				- [job.RemoveChunkAssignedToMiner] Remove the minerID from the job.minerMap
-			- If the miner exists in the scheduler.miners and is Idle() (has a currClientID that is -1)
-		- [srv.scheduler.ReassignChunk] Reassign Chunk
-	- [srv.scheduler.RemoveJob] If Client: Remove the client from scheduler.jobs (PASS)
-2. Join
-	- [srv.scheduler.AddMiner] Add Miner (PASS)
-	- [srv.scheduler.ScheduleJobs] Schedule Jobs
-		- [scheduler.GetIdleMiners] Get Idle Miners
-		- [NewPQ] Create a new Priority Queue of Jobs from the scheduler.Jobs
-		- [jobQ.RemoveMin] Remove the first elements from the Priority Queue
-		- If the idleMiner exists and the scheduler.jobs is not empty
-			- pop the first idleMiner and assign it to be minerID
-			- [currJob.AssignChunkToMine] Assign the first chunk of the job's pendingChunks to the miner
-			- If there is a chunkExists and the miner did not Drop
-				- assign the minerID's currClientID to the job's clientID
-			- If there is no chunkExists and the miner did not Drop
-				- [jobQ.RemoveMin] Remove the next element from the Priority Queue
-				- Update the current job to be the next element
-			- If the miner Drop
-				- [scheduler.RemoveMiner] Remove the minerID from the scheduler.miners
-			- If the miner is properly assigned a job
-				- remove it from the idleMiners
-3. Request
-	- [bitcoin.NewJob] Make New Job (PASS)
-	- [srv.scheduler.AddJob] Add Job (PASS)
-	- [srv.scheduler.ScheduleJobs] Schedule Jobs
-4. Result
-	- [srv.scheduler.GetMinersJob] Get Miner's Job, ClientID, Exist If the minerID exists in the scheduler.jobs)
-		- [scheduler.GetJob] Get Job of the miner's currClientID from scheduler.jobs
-	- If the job exists in the scheduler.jobs
-		- [job.RemoveChunkAssignedToMiner] Remove the minerID from the job.minerMap
-		- [job.ProcessResult] Comparison of the current minHash and minNonce with the miner's result (PASS)
-		- [job.Complete] If Complete: Job's pendingChunks and the minerMap is empty (PASS)
-			- [job.ProcessComplete] send the result of the job to the client
-			- [srv.scheduler.RemoveJob] Remove the clientID from the scheduler.jobs (PASS)
-	- [srv.scheduler.MinerIdle] Mark the miner's currClientID as -1; idle
-	- [srv.scheduler.ScheduleJobs] Schedule Jobs
-*/
-
+// reads the configuration channel and processes the message
+// based on the type of message
+// If the message is
+// 1. Disconnected: Remove the miner/client from the scheduler
+// 1(a). If Miner is disconnected and it had process to execute: Reassign the job to a different worker
+// 1(b). If Client is disconnected: Cease working on any requests being done on behalf of the client
+// 2. Join: Add the miner to the scheduler
+// 3. Request: Add the job to the scheduler
+// 4. Result: Process the result from the miner
+// 4(a). If the job is complete, send the result back to the client
 func (srv *server) processor() {
 	for {
 		config := <-srv.configureChan
 		if config.disconnected {
-
+			// MESSAGE TYPE: DISCONNECTED
 			// if server loses contact with a miner
 			// reassign any job that was assigned to the miner
 			// to a different worker
@@ -174,6 +140,7 @@ func (srv *server) processor() {
 				if chunk != nil {
 					srv.scheduler.ReassignChunk(chunk, jobID)
 				}
+				srv.scheduler.ScheduleJobs(LOGF)
 				// check if the minerID is not in the minerMap and fcfc.miners after disconnect
 				srv.scheduler.PrintAllJobs(LOGF)
 				srv.scheduler.PrintAllMiners(LOGF)
@@ -185,9 +152,8 @@ func (srv *server) processor() {
 				LOGF.Printf("[Server] Client[id %d] Disconnect]\n", config.connID)
 				srv.scheduler.RemoveJob(config.connID)
 			}
-
 		} else if config.message.Type == bitcoin.Join {
-
+			// MESSAGE TYPE: JOIN
 			// Add the miner to the scheduler
 			// Miner will be marked as idle
 
@@ -197,7 +163,7 @@ func (srv *server) processor() {
 			// TODO: LOG ALL SCHEDULER DATA-STRUCTURES HERE
 
 		} else if config.message.Type == bitcoin.Request {
-
+			// MESSAGE TYPE: REQUEST
 			// add job will add a job to scheduler.jobs
 			// start recording to calculate metrics
 
@@ -209,7 +175,7 @@ func (srv *server) processor() {
 			// TODO: PRINT ALL SCHEDULER DATA-STRUCTURES HERE
 
 		} else if config.message.Type == bitcoin.Result {
-
+			// MESSAGE TYPE: RESULT
 			LOGF.Printf("[Server] Miner[id %d] result:%s\n", config.connID, config.message)
 			minerID := config.connID
 

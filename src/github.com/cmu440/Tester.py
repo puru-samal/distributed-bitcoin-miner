@@ -346,7 +346,6 @@ def Test9(
     active_miners = 0
 
     first_batch = num_clients // 2
-    second_batch = num_clients - first_batch
 
     first_batch_clients = client_args[:first_batch]
     second_batch_clients = client_args[first_batch:]
@@ -389,6 +388,8 @@ def Test9(
             print("[No Active Miners]")
             pass
 
+    time.sleep(5.0)
+
     # kill some clients
     for i in range(num_clients_dropped):
         try:
@@ -410,18 +411,28 @@ def Test9(
 
     while running_clients:
         # Start the second batch of clients
-        for arg in second_batch_clients:
-            print("[Starting Client] :", arg)
-            client_process = start_client(arg)
+        while len(second_batch_clients):
+            # remove the args from the second batch
+            client_arg = second_batch_clients.pop()
+
+            print("[Starting Client] :", client_arg)
+            client_process = start_client(client_arg)
             running_clients.append(client_process)
             active_clients += 1
 
+        time.sleep(5.0)
+
         # Start the second batch of miners
-        for arg in second_batch_miners:
-            print("[Starting Miner] :", arg)
-            miner_process = start_miner(arg)
+        while len(second_batch_miners):
+            # remove the args from the second batch
+            miner_arg = second_batch_miners.pop()
+
+            print("[Starting Miner] :", miner_arg)
+            miner_process = start_miner(miner_arg)
             running_miners.append(miner_process)
             active_miners += 1
+
+        time.sleep(5.0)
 
         for client_process in running_clients:
             if client_process.poll() is not None:  # Process has finished
@@ -546,7 +557,7 @@ def multiple_requests_miner_killed_restarted(
             stdout, stderr = poll_process(client_process)
             if stdout:
                 output = f"[Client{client_process.pid}]: " + stdout.decode().strip()
-                coutputs.append(output)
+                outputs.append(output)
             if stderr:
                 err = f"[Client{client_process.pid}]: " + stderr.decode().strip()
             if client_process.returncode is not None:
@@ -611,8 +622,8 @@ def test9():
         num_clients=6,
         num_miners=6,
         nonces=[
-            999999999999,
-            999999999999,
+            999999,
+            999999,
             99999,
             9999,
             99,

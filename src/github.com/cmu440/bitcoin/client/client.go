@@ -14,6 +14,7 @@ import (
 	"github.com/cmu440/lsp"
 )
 
+// variables for logging
 var LOGF *log.Logger
 
 func main() {

@@ -20,11 +20,6 @@ type Chunk struct {
 	request *Message // The job request msg for this chunk
 }
 
-// inclusive lower and upper bounds
-func (c *Chunk) GetSize() uint64 {
-	return c.request.Upper - c.request.Lower + 1
-}
-
 // Job  _________________________________________________________________________________
 // A job is essentially a collection of chunks
 type Job struct {
@@ -84,6 +79,7 @@ func (job *Job) AssignChunkToMiner(minerID int, chunk *Chunk) {
 	job.minerMap[minerID] = chunk
 }
 
+// remove a chunk from the minerMap
 func (job *Job) RemoveChunkAssignedToMiner(minerID int) {
 	// [+Assumption] minerID was working on the chunk of the job
 	// 1) in RemoveMiner: it already checks if the minerID is in the minerMap
@@ -92,14 +88,7 @@ func (job *Job) RemoveChunkAssignedToMiner(minerID int) {
 	delete(job.minerMap, minerID)
 }
 
-// func (job *Job) String() string {
-// 	result := fmt.Sprintf("[job %d] nchunks:%d, pending:%d, proc: %d\n",
-// 		job.clientID, job.nChunks,
-// 		len(job.pendingChunks.chunks),
-// 		len(job.minerMap))
-// 	return result
-// }
-
+// Result a String representation of a job
 func (job *Job) String() string {
 	var result strings.Builder
 	result.WriteString(fmt.Sprintf("[job %d] nchunks:%d, pending:%d, proc: %d, miner_map:%s\n",
@@ -110,6 +99,7 @@ func (job *Job) String() string {
 	return result.String()
 }
 
+// Print the minerMap
 func minerMapString(m map[int]*Chunk) string {
 	var sb strings.Builder
 	sb.WriteString("[MinerMap]:{")
@@ -135,31 +125,6 @@ func (job *Job) GetPendingChunk() (*Chunk, bool) {
 	}
 	return chunk, true
 }
-
-// assigns a job to a miner
-// this involves removing a chunk from a queue
-// if it exists, then moving it to the minerMap
-// a payload should be immediately sent to the miner
-// returns true if a chunk exists, false if not
-// returns an nil if a request was sent to miner
-// returns a non-nil error if seding failed for potential reassignment
-/*
-func (job *Job) AssignChunkToMiner(minerID int) (bool, error) {
-	chunk, exist := job.pendingChunks.Dequeue() // Get the first chunk
-	if !exist {
-		return false, nil
-	}
-	payload, _ := json.Marshal(chunk.request)
-	error := job.server.Write(minerID, payload)
-	// miner is lost
-	if error != nil {
-		job.pendingChunks.Enqueue(chunk)
-		return true, error
-	}
-	job.minerMap[minerID] = chunk
-	return true, nil
-}
-*/
 
 // updates minHash and minNonce when a result is recv'd from a miner
 // and then removes the chunk from the minerMap
@@ -196,7 +161,7 @@ func (job *Job) GetCurrResult() (uint64, uint64) {
 	return job.minHash, job.minNonce
 }
 
-// for SRTF
+// get the number of pending chunks of the job
 func (job *Job) GetNumPendingChunks() int {
 	return job.pendingChunks.Size()
 }
@@ -221,6 +186,7 @@ func (miner *Miner) Busy() bool {
 	return miner.currClientID != -1
 }
 
+// String representation of a miner
 func (miner *Miner) String() string {
 	result := fmt.Sprintf("[Miner %d] job:%d\n", miner.minerID, miner.currClientID)
 	return result
@@ -239,9 +205,9 @@ func (miner *Miner) Idle() {
 // Scheduler  ______________________________________________________________________
 
 type Scheduler struct {
-	server lsp.Server
-	miners map[int]*Miner // key: minerID
-	jobs   map[int]*Job   // key: clientID
+	server lsp.Server     // server
+	miners map[int]*Miner // map of miners available key: minerID
+	jobs   map[int]*Job   // map of job requests key: clientID
 }
 
 // create a new scheduler
@@ -365,6 +331,7 @@ func (scheduler *Scheduler) NoJobs() bool {
 	return len(scheduler.jobs) == 0
 }
 
+// print all jobs in the scheduler
 func (scheduler *Scheduler) PrintAllJobs(logger *log.Logger) {
 	logger.Printf("Jobs:\n")
 	for _, job := range scheduler.jobs {
@@ -373,18 +340,11 @@ func (scheduler *Scheduler) PrintAllJobs(logger *log.Logger) {
 	}
 }
 
+// print all miners in the scheduler
 func (scheduler *Scheduler) PrintAllMiners(logger *log.Logger) {
 	logger.Printf("Miners:\n")
 	for _, miner := range scheduler.miners {
 		result := miner.String()
-		logger.Println(result)
-	}
-}
-
-func (scheduler *Scheduler) PrintAllPQ(logger *log.Logger, pq *jobTimeQ) {
-	logger.Printf("[Scheduler] Print All Jobs in PQ\n")
-	for _, job := range pq.q {
-		result := job.String()
 		logger.Println(result)
 	}
 }
@@ -394,7 +354,6 @@ func (scheduler *Scheduler) PrintAllPQ(logger *log.Logger, pq *jobTimeQ) {
 // attempts to reassign a chunk to a miner
 // returns true if chunk was successfully reassigned
 func (scheduler *Scheduler) ReassignChunk(chunk *Chunk, jobID int) {
-
 	job := scheduler.jobs[jobID]
 	job.pendingChunks.Enqueue(chunk)
 }
@@ -490,6 +449,7 @@ type RunningStats struct {
 	activeRecords map[int]time.Time // map keeping track of job start times
 }
 
+// create a new running stats
 func NewRS() RunningStats {
 	rs := RunningStats{
 		n:             0,
@@ -549,10 +509,12 @@ type ChunkQ struct {
 	chunks []*Chunk
 }
 
+// enqueue a chunk into the queue
 func (q *ChunkQ) Enqueue(chunk *Chunk) {
 	q.chunks = append(q.chunks, chunk)
 }
 
+// dequeue a chunk from the queue
 func (q *ChunkQ) Dequeue() (*Chunk, bool) {
 	if len(q.chunks) == 0 {
 		return nil, false
@@ -562,16 +524,14 @@ func (q *ChunkQ) Dequeue() (*Chunk, bool) {
 	return chunk, true
 }
 
+// get the size of the queue
 func (q *ChunkQ) Size() int {
 	return len(q.chunks)
 }
 
+// check if the queue is empty
 func (q *ChunkQ) Empty() bool {
 	return len(q.chunks) == 0
-}
-
-func (q *ChunkQ) Peek() *Chunk {
-	return q.chunks[0]
 }
 
 // Time-Based PQ  _______________________________________________________________________
@@ -623,9 +583,9 @@ func (pq *jobTimeQ) RemoveMin() (*Job, error) {
 }
 
 // check if the priority queue is empty
-func (pq *jobTimeQ) Empty() bool {
-	return len(pq.q) == 0
-}
+// func (pq *jobTimeQ) Empty() bool {
+// 	return len(pq.q) == 0
+// }
 
 // return the size of the priority queue
 func (pq *jobTimeQ) Size() int {
