@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/cmu440/lsp"
@@ -87,11 +88,30 @@ func (job *Job) RemoveChunkAssignedToMiner(minerID int) {
 }
 
 func (job *Job) String() string {
-	result := fmt.Sprintf("[job %d] nchunks:%d, pending:%d, proc: %d\n",
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("[job %d] nchunks:%d, pending:%d, proc: %d, miner_map:%s\n",
 		job.clientID, job.nChunks,
 		len(job.pendingChunks.chunks),
-		len(job.minerMap))
-	return result
+		len(job.minerMap),
+		minerMapString(job.minerMap)))
+	return result.String()
+}
+
+func minerMapString(m map[int]*Chunk) string {
+	var sb strings.Builder
+	sb.WriteString("[MinerMap]:{")
+	first := true
+	for key, value := range m {
+		if !first {
+			sb.WriteString(", ")
+		}
+		// Append key-value pairs to the string builder
+		sb.WriteString(fmt.Sprintf("miner:%d: chunk:%s", key, value.request.String()))
+		first = false
+	}
+
+	sb.WriteString("}")
+	return sb.String()
 }
 
 // assigns a job to a miner
@@ -303,12 +323,12 @@ func (scheduler *Scheduler) GetMinersJob(minerID int) (*Job, int, bool) {
 }
 
 // no jobs to process
-func (scheduler *Scheduler) JobsComplete() bool {
+func (scheduler *Scheduler) NoJobs() bool {
 	return len(scheduler.jobs) == 0
 }
 
 func (scheduler *Scheduler) PrintAllJobs(logger *log.Logger) {
-	logger.Printf("[Scheduler] Print All Jobs\n")
+	logger.Printf("Jobs:\n")
 	for _, job := range scheduler.jobs {
 		result := job.String()
 		logger.Println(result)
@@ -316,7 +336,7 @@ func (scheduler *Scheduler) PrintAllJobs(logger *log.Logger) {
 }
 
 func (scheduler *Scheduler) PrintAllMiners(logger *log.Logger) {
-	logger.Printf("[Scheduler] Print All Miners\n")
+	logger.Printf("Miners:\n")
 	for _, miner := range scheduler.miners {
 		result := miner.String()
 		logger.Println(result)
@@ -340,27 +360,24 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 
 	idleMiners := scheduler.GetIdleMiners()
 	// nothing to schedule, return
-	if scheduler.JobsComplete() || len(idleMiners) == 0 {
-		logger.Printf("[Scheduler] JobsComplete || No idleMiners\n")
+	if scheduler.NoJobs() || len(idleMiners) == 0 {
+		logger.Printf("[Scheduler] No Jobs || No idleMiners\n")
+		logger.Printf("[Scheduler]:\n")
+		scheduler.PrintAllJobs(logger)
+		scheduler.PrintAllMiners(logger)
 		return
 	}
-
-	logger.Printf("[Scheduler] Before Scheduling Jobs\n")
-	scheduler.PrintAllJobs(logger)
-	scheduler.PrintAllMiners(logger)
 
 	// earliest job based on remaining processing time
 	jobQ := NewPQ()
 	for _, job := range scheduler.jobs {
-		logger.Printf("1\n")
 		jobQ.Insert(job)
 	}
 	// [+Assumption] there's always a job in the jobQ
 	// RemoveMin already checks for the empty condition
 	currJob, _ := jobQ.RemoveMin()
 	// [+Assumption] scheduler.jobs and jobQ do not need to be in sync
-	for len(idleMiners) > 0 && !scheduler.JobsComplete() {
-		logger.Printf("2\n")
+	for len(idleMiners) > 0 && !scheduler.NoJobs() {
 		minerID := idleMiners[0].minerID
 		chunkExist, minerDropped := currJob.AssignChunkToMiner(minerID)
 
@@ -372,14 +389,13 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 			newJob, err := jobQ.RemoveMin()
 			if err != nil {
 				logger.Printf("[Scheduler] Miner available but no more jobs to schedule \n")
-				logger.Printf("[Scheduler] After Scheduling Jobs\n")
+				logger.Printf("[Scheduler]:\n")
 				scheduler.PrintAllJobs(logger)
 				scheduler.PrintAllMiners(logger)
 				return
 			}
 			currJob = newJob
 		}
-		logger.Printf("4\n")
 		// miner has been lost: remove
 		if minerDropped != nil {
 			// miner is lost
@@ -389,10 +405,9 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 		if idleMiners[0].Busy() {
 			idleMiners = idleMiners[1:]
 		}
-		logger.Printf("5\n")
 	}
 
-	logger.Printf("[Scheduler] After Scheduling Jobs\n")
+	logger.Printf("[Scheduler]:\n")
 	scheduler.PrintAllJobs(logger)
 	scheduler.PrintAllMiners(logger)
 }

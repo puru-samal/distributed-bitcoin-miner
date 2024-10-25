@@ -107,7 +107,7 @@ func main() {
 			return
 		}
 	*/
-	const numArgs = 2
+	const numArgs = 3
 	if len(os.Args) != numArgs {
 		if numArgs == 2 {
 			fmt.Printf("Usage: ./%s <hostport>", os.Args[0])
