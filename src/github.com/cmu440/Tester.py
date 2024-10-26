@@ -1,12 +1,11 @@
-import subprocess
 import os
-import tqdm
 from test_helpers import *
+import argparse
 
 # To kill a process running on a port
 # sudo lsof -i udp:6060
 # sudo kill -9 <PID>
-# for pid in {889..1017}; do sudo kill -9 $pid; done
+# if sequential pid's: for pid in {889..1017}; do sudo kill -9 $pid; done
 
 # Define the paths to the Go programs
 gopath_bin = os.path.expanduser("~/go/bin")
@@ -399,21 +398,47 @@ def killUnassignedMiner(nonces=[9999], latencies=[0,0]):
 
 
 
-
 if __name__ == "__main__":
-    # Basic1: 1 job, 1 miner, 1 chunk
-    # BasicTest(nonces=[9999], latencies=[0], clients_to_start=[0], miners_to_start=[0])
-    # Basic2: 1 job, 1 miner, 10 chunk
-    # BasicTest(nonces=[99999], latencies=[0], clients_to_start=[0], miners_to_start=[0])
-    # Basic3: 2 jobs (one small, one large), 1 miner
-    # BasicTest(nonces=[999, 99999], latencies=[0], clients_to_start=[0, 1], miners_to_start=[0])
-    # Basic: 4 jobs, 2 miners
-    # BasicTest(nonces=[999, 99999, 9999, 9999], latencies=[0, 0], clients_to_start=[0, 1, 2, 3], miners_to_start=[0, 1])
-    # A miner is killed after processing one, then a new miner restarted to process the remaining
-    # multipleRequestsMinerKilledRestarted()
-    # it's complicated
-    # multiplRequestsRequestsMinersKilled()
-    # Create a miner, kill, start a client, wait, and then start a new miner
-    killUnassignedMiner()
-    pass
+    parser = argparse.ArgumentParser(description="Testing for the bitcoin implementation.")
+    parser.add_argument(
+    "--test",
+    type=int,
+    help="""(int) available:
+    1:Basic1,
+    2:Basic2,
+    3:Basic3,
+    4:Basic,
+    5:multipleRequestsMinerKilledRestarted,
+    6:multiplRequestsRequestsMinersKilled,
+    7:killUnassignedMiner
+    """,
+    )
+
+    args = parser.parse_args()
+
+    # Tests available:
+    if args.test == 1:
+        # 1 -> Basic1: 1 job, 1 miner, 1 chunk
+        BasicTest(nonces=[9999], latencies=[0], clients_to_start=[0], miners_to_start=[0])
+    elif args.test == 2:
+        # 2 -> Basic2: 1 job, 1 miner, 10 chunk
+        BasicTest(nonces=[99999], latencies=[0], clients_to_start=[0], miners_to_start=[0])
+    elif args.test == 3:
+        # 3 -> Basic3: 2 jobs (one small, one large), 1 miner
+        BasicTest(nonces=[999, 99999], latencies=[0], clients_to_start=[0, 1], miners_to_start=[0])
+    elif args.test == 4:
+        # 4 -> Basic: 4 jobs, 2 miners
+        BasicTest(nonces=[999, 99999, 9999, 9999], latencies=[0, 0], clients_to_start=[0, 1, 2, 3], miners_to_start=[0, 1])
+    elif args.test == 5:
+        # 5 -> multipleRequestsMinerKilledRestarted: A miner is killed after processing one, then a new miner restarted to process the remaining
+        multipleRequestsMinerKilledRestarted()
+    elif args.test == 6:
+        # 6 -> multiplRequestsRequestsMinersKilled: it's complicated
+        multiplRequestsRequestsMinersKilled()
+    elif args.test == 7:
+        # 7 -> Create a miner, kill, start a client, wait, and then start a new miner
+        killUnassignedMiner()
+    else:
+        print("Test not available. Run with -h to see available tests.")
+    
     

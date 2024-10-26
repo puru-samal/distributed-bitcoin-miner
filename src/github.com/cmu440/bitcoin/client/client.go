@@ -58,8 +58,6 @@ func main() {
 
 	defer client.Close()
 
-	// TODO: implement this!
-
 	// Create and send a new request
 	request := bitcoin.NewRequest(message, 0, maxNonce)
 	payload, _ := json.Marshal(request)

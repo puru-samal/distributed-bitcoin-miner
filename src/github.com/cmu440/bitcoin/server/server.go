@@ -12,13 +12,18 @@ import (
 )
 
 // LOAD BALANCING STRATEGY
-// We have a queue of jobs that need to be processed
-// and a list of idle miners that can process the jobs.
-// We first prioritize the jobs in the following order:
+// We use a variable-priority strategy to load balance
+// All of this is managed by a custom Priority Queue
+// data structure -> JobQ (see common.go)
+// We ourder of priority is as follows :
 // 1. Jobs that have a lower nonce
 // 2. Jobs that have less pending chunks to be processed;
-//    this is to ensure that the job is processed faster
-// 3. Jobs that have been waiting for the longest time;
+//    the reason for this is that the number of chunks a
+//    job has should correlate with the response time of
+//    job, to follow the SRTF strategy to minimize our
+//    response time. A special case is when there are
+//    no pending chunks. Those jobs are not scheduled.
+// 3. Jobs that were recieved earlier;
 //   this is to ensure that jobs with identical requests are processed
 //	 in the order they were received
 // After prioritizing the jobs, we assign the job to the idle miner.
@@ -76,7 +81,6 @@ func main() {
 	defer file.Close()
 
 	LOGF = log.New(file, "", log.Lshortfile|log.Lmicroseconds)
-	// Usage: LOGF.Println() or LOGF.Printf()
 
 	const numArgs = 2
 	if len(os.Args) != numArgs {
@@ -99,7 +103,6 @@ func main() {
 
 	defer srv.lspServer.Close()
 
-	// TODO: implement this!
 	go srv.reader()
 	srv.processor()
 }
@@ -143,10 +146,10 @@ func (srv *server) processor() {
 		if config.disconnected {
 			// MESSAGE TYPE: DISCONNECTED
 			// if server loses contact with a miner
-			// reassign any job that was assigned to the miner
-			// to a different worker
+			// put the chunk the miner was working in back in the job
+			// rescheudule
 			// If there are no available miners left,
-			// the server should wait for a new miner to join before reassigning the old miner’s job.
+			// the server will wait for a new miner to join before reassigning the old miner’s job.
 			if srv.scheduler.IsMiner(config.connID) {
 				LOGF.Printf("[Server] Miner[id %d] Disconnect\n", config.connID)
 				chunk, jobID := srv.scheduler.RemoveMiner(config.connID)
@@ -154,7 +157,7 @@ func (srv *server) processor() {
 					srv.scheduler.ReassignChunk(chunk, jobID)
 				}
 				srv.scheduler.ScheduleJobs(LOGF)
-				// check if the minerID is not in the minerMap and fcfc.miners after disconnect
+				// check if the minerID is not in the minerMap and scheduler.miners after disconnect
 				srv.scheduler.PrintAllJobs(LOGF)
 				srv.scheduler.PrintAllMiners(LOGF)
 			} else {
@@ -169,23 +172,19 @@ func (srv *server) processor() {
 			// MESSAGE TYPE: JOIN
 			// Add the miner to the scheduler
 			// Miner will be marked as idle
-
 			LOGF.Printf("[Server] Miner[id %d] Joined\n", config.connID)
 			srv.scheduler.AddMiner(config.connID)
 			srv.scheduler.ScheduleJobs(LOGF)
-			// TODO: LOG ALL SCHEDULER DATA-STRUCTURES HERE
 
 		} else if config.message.Type == bitcoin.Request {
 			// MESSAGE TYPE: REQUEST
 			// add job will add a job to scheduler.jobs
 			// start recording to calculate metrics
-
 			LOGF.Printf("[Server] Client[id %d] Request: %s\n", config.connID, config.message.Data)
 			srv.rStats.StartRecording(config.connID)
 			job := bitcoin.NewJob(srv.lspServer, config.connID, config.message.Data, config.message, bitcoin.ChunkSize)
 			srv.scheduler.AddJob(job)
 			srv.scheduler.ScheduleJobs(LOGF)
-			// TODO: PRINT ALL SCHEDULER DATA-STRUCTURES HERE
 
 		} else if config.message.Type == bitcoin.Result {
 			// MESSAGE TYPE: RESULT
@@ -195,20 +194,20 @@ func (srv *server) processor() {
 			// if a job exists
 			// if a client disconnects, a job should have been removed,
 			// in this case exist will return false and the result will be ignored
-			job, clientID, exist := srv.scheduler.GetMinersJob(minerID)
+			job, exist := srv.scheduler.GetMinersJob(minerID)
 			if exist {
 				job.RemoveChunkAssignedToMiner(minerID)
 				// update client's minNonce, minHash
 				job.ProcessResult(minerID, config.message)
 				currMinHash, currMinNonce := job.GetCurrResult()
-				LOGF.Printf("[Server] Client[id %d] result: currentMinHash:%d currentMinNonce:%d\n", clientID, currMinHash, currMinNonce)
+				LOGF.Printf("[Server] Client[id %d] result: currentMinHash:%d currentMinNonce:%d\n", job.GetClientID(), currMinHash, currMinNonce)
 
 				// If a job is complete, send the result back to the client
 				if job.Complete() {
-					LOGF.Printf("[Server] Client[id %d] sending final result minHash:%d minNonce:%d\n", clientID, currMinHash, currMinNonce)
-					srv.rStats.StopRecording(clientID)
+					LOGF.Printf("[Server] Client[id %d] sending final result minHash:%d minNonce:%d\n", job.GetClientID(), currMinHash, currMinNonce)
+					srv.rStats.StopRecording(job.GetClientID())
 					job.ProcessComplete()
-					srv.scheduler.RemoveJob(clientID)
+					srv.scheduler.RemoveJob(job.GetClientID())
 					mean, dev := srv.rStats.GetStats()
 					LOGF.Printf("[Final Stat]: %f %f\n", mean, dev)
 				}

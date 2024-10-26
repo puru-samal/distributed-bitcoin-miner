@@ -54,9 +54,9 @@ def start_server(server_path):
     return server_process
 
 
-def create_miner_args(miner_path, latency: int):
+def create_miner_args(miner_path, latency:int=0):
     '''Create the argument to start a miner'''
-    return [miner_path, "localhost:6060", f"{latency}"]
+    return [miner_path, "localhost:6060"]
 
 
 def start_miner(miner_arg):

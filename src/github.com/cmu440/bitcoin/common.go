@@ -17,16 +17,18 @@ import (
 const ChunkSize = 10000
 
 type Chunk struct {
-	request *Message // The job request msg for this chunk
+	request *Message // The request msg to process this chunk
 }
 
 // Job  _________________________________________________________________________________
-// A job is essentially a collection of chunks
+// a job is a collection of chunks. A job is created when a request is recieved from the client.
+// it is then broken up into chunks and assigned to miners for processing
+// when all chunks are processed, the final result is computed and then sent to client
 type Job struct {
-	server        lsp.Server
+	server        lsp.Server     // server referece required to send the result to the client
 	clientID      int            // client connID that submitted the request
 	data          string         // the data sent in a request
-	maxNonce      uint64         // notion of size
+	maxNonce      uint64         // the maximum nonce we're supoosed to search over
 	startTime     time.Time      // update with time.Now() when a client request is recv'd
 	minHash       uint64         // the current min hash
 	minNonce      uint64         // the current minNonce
@@ -37,7 +39,8 @@ type Job struct {
 
 // creates a new job upon getting a client request
 // breaks the client request into Chunks that are stored in pendingChunks
-// invariant: len(pendingCunks) + len(minerMap) = nChunks
+// when a miner is assigned to a chunk, a chunk is moved from pendingChunk -> minerMap
+// key'd by the minerID of the miner that is currently tasked with processing the chunk
 func NewJob(server lsp.Server, clientID int, data string, clientRequest *Message, chunkSize uint64) *Job {
 
 	job := &Job{
@@ -52,6 +55,10 @@ func NewJob(server lsp.Server, clientID int, data string, clientRequest *Message
 		minerMap:      make(map[int]*Chunk),
 		nChunks:       0,
 	}
+
+	// break the job into chunks which will contain
+	// the miner request message required to process that chunk
+	// store them all in pending chunks
 
 	for i := uint64(0); i < job.maxNonce; i += chunkSize {
 		// inclusive lower and upper bounds
@@ -69,6 +76,15 @@ func NewJob(server lsp.Server, clientID int, data string, clientRequest *Message
 	return job
 }
 
+// getter for the job's clientID
+func (job *Job) GetClientID() int {
+	return job.clientID
+}
+
+// given a minerID, look into the minerMap to see
+// if it is currently assigned to process a chunk.
+// 1. return chunk, true if it exists
+// 2. return nil, false it it does not
 func (job *Job) GetChunkAssignedToMiner(minerID int) (*Chunk, bool) {
 	chunk, exist := job.minerMap[minerID]
 	return chunk, exist
@@ -81,14 +97,13 @@ func (job *Job) AssignChunkToMiner(minerID int, chunk *Chunk) {
 
 // remove a chunk from the minerMap
 func (job *Job) RemoveChunkAssignedToMiner(minerID int) {
-	// [+Assumption] minerID was working on the chunk of the job
-	// 1) in RemoveMiner: it already checks if the minerID is in the minerMap
-	// 2) when the miner returns a result
+	// 1. in RemoveMiner: it already checks if the minerID is in the minerMap
+	// 2. when the miner returns a result
 	// only the miner who was assigned the chunk can return result
 	delete(job.minerMap, minerID)
 }
 
-// Result a String representation of a job
+// a string representation of a job for logging
 func (job *Job) String() string {
 	var result strings.Builder
 	result.WriteString(fmt.Sprintf("[job %d] nchunks:%d, pending:%d, proc: %d, miner_map:%s\n",
@@ -99,7 +114,8 @@ func (job *Job) String() string {
 	return result.String()
 }
 
-// Print the minerMap
+// a string representation of the minerMap used
+// by the job's String() method
 func minerMapString(m map[int]*Chunk) string {
 	var sb strings.Builder
 	sb.WriteString("[MinerMap]:{")
@@ -117,7 +133,9 @@ func minerMapString(m map[int]*Chunk) string {
 	return sb.String()
 }
 
-// deque get a pending chunk from a job, exist is false if no pending
+// deque get a pending chunk from a job,
+// 1. return chunk, true if one exists
+// 2. return nil, false if it does not
 func (job *Job) GetPendingChunk() (*Chunk, bool) {
 	chunk, exist := job.pendingChunks.Dequeue() // Get the first chunk
 	if !exist {
@@ -142,7 +160,6 @@ func (job *Job) ProcessComplete() {
 	result := NewResult(job.minHash, job.minNonce)
 	rpayload, _ := json.Marshal(result)
 	err := job.server.Write(job.clientID, rpayload)
-	//[+Assumption] if error occurs while writing to the client
 	// it should cease working on any requests being done on behalf of the client
 	// ignore the result
 	if err != nil {
@@ -151,7 +168,8 @@ func (job *Job) ProcessComplete() {
 }
 
 // condition for when a job is considered to be complete
-// when all pendingChunks.Empty() && len(minerMap) == 0
+// 1. returns true if pendingChunks.Empty() && len(minerMap) == 0
+// 2. returns false otherwise
 func (job *Job) Complete() bool {
 	return job.pendingChunks.Empty() && len(job.minerMap) == 0
 }
@@ -167,9 +185,11 @@ func (job *Job) GetNumPendingChunks() int {
 }
 
 // Miner  ______________________________________________________________________________
+// this is a worker representation (i.e. the miner) from the server side interface
+// ideally, miners are assigned work (chunks), which they work on and then return the result
 type Miner struct {
 	minerID      int // miner connID that joined the server
-	currClientID int // current job worker is assigned to. Note: Miner is only processing a chunk.
+	currClientID int // the jobID of the chunk miner is currently assigned to.
 }
 
 // Create new miner
@@ -181,7 +201,9 @@ func NewMiner(minerID int) *Miner {
 	return worker
 }
 
-// see if a miner is busy or not: miner.currClientID != -1
+// see if a miner is busy or not:
+// 1. returns true if miner.currClientID != -1
+// 2. returns false otherwise
 func (miner *Miner) Busy() bool {
 	return miner.currClientID != -1
 }
@@ -203,6 +225,12 @@ func (miner *Miner) Idle() {
 }
 
 // Scheduler  ______________________________________________________________________
+// the scheduler manages work(chunk) allocations from jobs to (workers)miners
+// our job priority strategy is as follows:
+// Priority#1 -> request size (jobs.maxNonce)
+// Priority#2 -> estd. response time (size of jobs.pendingChunks)
+// Proirity#3 -> job start time which is recorded when a job is recv'd
+// This prioritization is managed by a custom priorirty queue: JobQ (see below)
 
 type Scheduler struct {
 	server lsp.Server     // server
@@ -220,18 +248,19 @@ func NewScheduler(srv lsp.Server) *Scheduler {
 }
 
 // Miner Management ________________________________________________________________
+// helper functions for miner management
 
 // create and add a new miner to internal data structures
-// called when when a join message is recieved from miner
 func (scheduler *Scheduler) AddMiner(minerID int) {
 	miner := NewMiner(minerID)
 	scheduler.miners[minerID] = miner
 }
 
 // remove a miner when a miner is disconnected
-// disconnection can happen on read/writes!
-// remove any references from all internal data structures (job.minerMap, scheduler.miners, )
-// if it was busy, return the chunk it was tasked with processing, and the jobID the chunk belongs to
+// disconnection can be detected  on read/write
+// remove any references from all internal data structures (job.minerMap, scheduler.miners... )
+// 1. If the miner was busy, return the chunk it was tasked with processing, and the jobID the chunk belongs to
+// 2. otherwise return nil, -1
 func (scheduler *Scheduler) RemoveMiner(minerID int) (*Chunk, int) {
 	miner, exist := scheduler.miners[minerID]
 	var chunk *Chunk
@@ -239,26 +268,21 @@ func (scheduler *Scheduler) RemoveMiner(minerID int) (*Chunk, int) {
 	jobID := -1
 	// if miner is busy, get the chuck assigned to it
 	if exist && miner.Busy() {
-		job, _, jobExist := scheduler.GetMinersJob(minerID)
-		// [+Assumption] job exists in scheduler.jobs
+		job, jobExist := scheduler.GetMinersJob(minerID)
 		if !jobExist {
 			fmt.Printf("[RemoveMiner] Job does not exist in scheduler.jobs\n")
 			return nil, -1
 		}
-		// [+Assumption] chunk exists in job.minerMap
-
 		chunk, chunkExist = job.GetChunkAssignedToMiner(minerID)
 		if !chunkExist {
 			fmt.Printf("[RemoveMiner] Chunk does not exist in job.minerMap\n")
 		}
 		job.RemoveChunkAssignedToMiner(minerID)
-		// assert minerID.currClientID == job.clientID
 		if job.clientID != miner.currClientID {
 			fmt.Printf("[RemoveMiner] MinerID.currClientID != Job.clientID\n")
 		}
 		jobID = job.clientID
 	}
-	// [+Assumption] minerID exists in scheduler.miners
 	if exist {
 		delete(scheduler.miners, minerID)
 	}
@@ -266,7 +290,8 @@ func (scheduler *Scheduler) RemoveMiner(minerID int) (*Chunk, int) {
 }
 
 // iterate through the map and create a slice of idle miners
-// might be expensive, but reduces the overhead of data-sturcture bookkeeping
+// having a seperate data structure would be faster but adds additional complexity
+// to preserve our invariants, this reduces the overhead of data-sturcture bookkeeping
 func (scheduler *Scheduler) GetIdleMiners() []*Miner {
 	idleMiners := []*Miner{}
 	for _, miner := range scheduler.miners {
@@ -277,7 +302,7 @@ func (scheduler *Scheduler) GetIdleMiners() []*Miner {
 	return idleMiners
 }
 
-// used to mark a miner as idle and available
+// used to mark a miner as idle and available.
 func (scheduler *Scheduler) MinerIdle(minerID int) {
 	miner, exist := scheduler.miners[minerID]
 	if exist {
@@ -293,6 +318,7 @@ func (scheduler *Scheduler) IsMiner(id int) bool {
 }
 
 // Job Management __________________________________________________________________
+// helper functions for job management
 
 // add a job to the job list,
 // called when a a client request is recv'd
@@ -301,37 +327,36 @@ func (scheduler *Scheduler) AddJob(job *Job) {
 }
 
 // remove a job from the job list
-// called when a job is complete
+// RemoveJob is done when:
+// 1. A job is complete
+// 2. A client is disconnected
 func (scheduler *Scheduler) RemoveJob(clientID int) {
-	// [+Assumption] clientID exists in scheduler.jobs
-	// RemoveJob is done when:
-	// 1. A job is complete
-	// 2. A client is disconnected
 	delete(scheduler.jobs, clientID)
 }
 
 // get a job based on the clientID that created it
-// also returns a bool, true if it exists, false if not
+// 1. returns *Job, true if it exists
+// 2. nil, false otherwise
 func (scheduler *Scheduler) GetJob(clientID int) (*Job, bool) {
 	job, exist := scheduler.jobs[clientID]
 	return job, exist
 }
 
 // retreive the job associated with a miner
-// also returns the job, the jobID(clientID) a bool indicating if it is valid
-func (scheduler *Scheduler) GetMinersJob(minerID int) (*Job, int, bool) {
-	// [+Assumption] minerID exists in scheduler.miners and is Busy()
+// 1. returns *Job, true if a miner was working on a job
+// 2. returns false otherwise
+func (scheduler *Scheduler) GetMinersJob(minerID int) (*Job, bool) {
 	miner := scheduler.miners[minerID]
 	job, exist := scheduler.GetJob(miner.currClientID)
-	return job, miner.currClientID, exist
+	return job, exist
 }
 
-// no jobs to process: len(scheduler.jobs) == 0
+// condition for no jobs left to process: len(scheduler.jobs) == 0
 func (scheduler *Scheduler) NoJobs() bool {
 	return len(scheduler.jobs) == 0
 }
 
-// print all jobs in the scheduler
+// helper to log all jobs in the scheduler
 func (scheduler *Scheduler) PrintAllJobs(logger *log.Logger) {
 	logger.Printf("Jobs:\n")
 	for _, job := range scheduler.jobs {
@@ -340,7 +365,7 @@ func (scheduler *Scheduler) PrintAllJobs(logger *log.Logger) {
 	}
 }
 
-// print all miners in the scheduler
+// helper to job miners in the scheduler
 func (scheduler *Scheduler) PrintAllMiners(logger *log.Logger) {
 	logger.Printf("Miners:\n")
 	for _, miner := range scheduler.miners {
@@ -350,18 +375,21 @@ func (scheduler *Scheduler) PrintAllMiners(logger *log.Logger) {
 }
 
 // Chunk Management __________________________________________________________________
+// helper functions for chunk management
 
-// attempts to reassign a chunk to a miner
-// returns true if chunk was successfully reassigned
+// reassigns a chunk for later scheduling: job.pendingChunks.Enqueue(chunk)
+// used to handle the case when a busy miner is dropped
 func (scheduler *Scheduler) ReassignChunk(chunk *Chunk, jobID int) {
-	job := scheduler.jobs[jobID]
-	job.pendingChunks.Enqueue(chunk)
+	job, exist := scheduler.jobs[jobID]
+	if exist {
+		job.pendingChunks.Enqueue(chunk)
+	}
 }
 
-// Scheduler scheduler, false means nothing was scheduled
+// the main scheduler
 func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 
-	// nothing to schedule, return
+	// no jobs => nothing to schedule, return
 	if scheduler.NoJobs() {
 		logger.Printf("[Scheduler] No Jobs\n")
 		logger.Printf("[Scheduler]:\n")
@@ -371,7 +399,7 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 	}
 
 	idleMiners := scheduler.GetIdleMiners()
-	// nothing to schedule, return
+	// no idle miners => nothing to schedule, return
 	if len(idleMiners) == 0 {
 		logger.Printf("No idleMiners\n")
 		logger.Printf("[Scheduler]:\n")
@@ -380,14 +408,25 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 		return
 	}
 
-	// earliest job based on load balancing strategy
-	jobQ := NewPQ()
+	// insert existing jobs into the custom-PQ
+	// jobs should be sorted acc. to out prioritization
+	// strategy
+	jobQ := NewJQ()
 	for _, job := range scheduler.jobs {
 		jobQ.Insert(job)
 	}
-	// [+Assumption] there's always a job in the jobQ
-	// RemoveMin already checks for the empty condition
-	// [+Assumption] scheduler.jobs and jobQ do not need to be in sync
+
+	// while there are jobs to process and miners that are available
+	// 1. get a chunk from a job,
+	//    1. if chunk exists
+	//    	1. send a request to that miner
+	//       	1. if a miner was lost, remove miner, restore invariants
+	//       	2. else, change state in *Job, *Miner, *Scheduler struct
+	//             to indicate that the miner is currently working on that chunk
+	//      2. if chunk does not exist, move on to the next job
+	// 2. if the current miner is busy and there are more miners left
+	//    go on to the next miner and repeat
+
 	currJob, _ := jobQ.RemoveMin()
 	for len(idleMiners) > 0 && jobQ.Size() >= 0 {
 
@@ -432,8 +471,9 @@ func (scheduler *Scheduler) ScheduleJobs(logger *log.Logger) {
 
 // Data Structures ______________________________________________________________________
 // RunningStats  ________________________________________________________________________
-// A data structure that keeps track of the running mean
-// and standard deviation based on the Welford's algorithm.
+// A data structure that keeps track of the running mean and standard deviation based on the Welford's algorithm.
+// We created this data structure as a means of tracking the performance of diffrent load balancing strategies.
+// The goal is to jointly optimize efficiency and fairness by minimizing mean response time and variance.
 // usage:
 // initialize                            ->  rs := RunningStats{}
 // record new job                        -> rs.StartRecording(clientID)
@@ -498,11 +538,6 @@ func (rs *RunningStats) GetStats() (float64, float64) {
 
 // ChunkQ  ______________________________________________________________________________
 // A queue of chunks, the basic unit of work in this system
-// when a job is created for a client, break up the work into chunks
-// and sequentially enqueue into the pendingChunks within Job struct
-// when a worker is available to be assigned to a chunk, deque a chunk into
-// the activeChunk map within jobs, key'd by the minerID
-// Job.pendingChunks.Empty() => A job has been completed.
 
 // create with queue := &ChunkQ{}
 type ChunkQ struct {
@@ -534,17 +569,20 @@ func (q *ChunkQ) Empty() bool {
 	return len(q.chunks) == 0
 }
 
-// Time-Based PQ  _______________________________________________________________________
-// list of messages inside the priority queue
-type jobTimeQ struct {
+// Custom Job PQ  _______________________________________________________________________
+// A custom priority queue implementation
+// Uses a custom comparator based on oue load balancing strategy
+// to maintain the min-heap invariants.
+
+type JobQ struct {
 	q []*Job
 }
 
-/** API **/
+/** USER API **/
 
 // create a new priority queue
-func NewPQ() *jobTimeQ {
-	newQueue := &jobTimeQ{
+func NewJQ() *JobQ {
+	newQueue := &JobQ{
 		q: make([]*Job, 0),
 	}
 	return newQueue
@@ -552,14 +590,14 @@ func NewPQ() *jobTimeQ {
 
 // insert a new message into the priority queue
 // and maintain the min heap property
-func (pq *jobTimeQ) Insert(elem *Job) {
+func (pq *JobQ) Insert(elem *Job) {
 	pq.q = append(pq.q, elem)
 	pq.minHeapifyUp(len(pq.q) - 1)
 }
 
 // get the message with the minimum sequence number
 // if the priority queue is empty, return an error
-func (pq *jobTimeQ) GetMin() (*Job, error) {
+func (pq *JobQ) GetMin() (*Job, error) {
 	if len(pq.q) == 0 {
 		return nil, fmt.Errorf("priority queue is empty")
 	}
@@ -569,7 +607,7 @@ func (pq *jobTimeQ) GetMin() (*Job, error) {
 
 // remove the message with the minimum sequence number
 // and maintain the minheap property
-func (pq *jobTimeQ) RemoveMin() (*Job, error) {
+func (pq *JobQ) RemoveMin() (*Job, error) {
 	min, err := pq.GetMin()
 
 	if err != nil {
@@ -583,38 +621,38 @@ func (pq *jobTimeQ) RemoveMin() (*Job, error) {
 }
 
 // return the size of the priority queue
-func (pq *jobTimeQ) Size() int {
+func (pq *JobQ) Size() int {
 	return len(pq.q)
 }
 
 /** internal helpers **/
 
 // check if the index is valid in the priority queue
-func (pq *jobTimeQ) isValidIdx(idx int) bool {
+func (pq *JobQ) isValidIdx(idx int) bool {
 	return (0 <= idx) && (idx < len(pq.q))
 }
 
 // get the parent of the current index
-func (pq *jobTimeQ) parent(idx int) int {
+func (pq *JobQ) parent(idx int) int {
 	newIdx := (idx - 1) >> 1
 	return newIdx
 }
 
 // get the left child of the current index
-func (pq *jobTimeQ) leftChild(idx int) int {
+func (pq *JobQ) leftChild(idx int) int {
 	newIdx := (idx << 1) + 1
 	return newIdx
 }
 
 // get the right child of the current index
-func (pq *jobTimeQ) rightChild(idx int) int {
+func (pq *JobQ) rightChild(idx int) int {
 	newIdx := (idx << 1) + 2
 	return newIdx
 }
 
 // maintain the min heap property by moving the element down
 // used when removing the minimum element
-func (pq *jobTimeQ) minHeapifyDown(idx int) {
+func (pq *JobQ) minHeapifyDown(idx int) {
 	if !pq.isValidIdx(idx) {
 		return
 	}
@@ -669,7 +707,7 @@ func (pq *jobTimeQ) minHeapifyDown(idx int) {
 
 // maintain the min heap property by moving the element up
 // used when inserting a new element
-func (pq *jobTimeQ) minHeapifyUp(idx int) {
+func (pq *JobQ) minHeapifyUp(idx int) {
 	if !pq.isValidIdx(idx) {
 		return
 	}
