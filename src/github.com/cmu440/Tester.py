@@ -413,7 +413,11 @@ if __name__ == "__main__":
     # BasicTest(nonces=[999, 99999], latencies=[0], clients_to_start=[0, 1], miners_to_start=[0])
     # Basic: 4 jobs, 2 miners
     # BasicTest(nonces=[999, 99999, 9999, 9999], latencies=[0, 0], clients_to_start=[0, 1, 2, 3], miners_to_start=[0, 1])
+    # A miner is killed after processing one, then a new miner restarted to process the remaining
     # multipleRequestsMinerKilledRestarted()
+    # it's complicated
     # multiplRequestsRequestsMinersKilled()
-    killUnassignedMiner()
+    # Create a miner, kill, start a client, wait, and then start a new miner
+    # killUnassignedMiner()
+    pass
     
