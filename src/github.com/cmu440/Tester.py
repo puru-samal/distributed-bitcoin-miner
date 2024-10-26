@@ -22,7 +22,7 @@ def BasicTest(nonces=[9999], latencies=[0], clients_to_start=[0], miners_to_star
     
     # Compile
     compile_programs()
-    print(f"[TESTER]: BasicTest1")
+    print(f"[TESTER]: Testing ...")
 
     # Start the server process
     server_process = start_server(server_path)
@@ -75,7 +75,6 @@ def BasicTest(nonces=[9999], latencies=[0], clients_to_start=[0], miners_to_star
                 print("[Active Miners] : ", active_miners)
 
     # Cleanup: Stop server and miners
-    print("[TESTER]: Stopping processes...")
     cleanup(server_process=server_process, running_client_process=running_clients, running_miner_process=running_miners)
     
     # check:
@@ -101,7 +100,7 @@ def multipleRequestsMinerKilledRestarted(nonces=[9999, 9999, 9999, 9999], latenc
     
     # Compile
     compile_programs()
-    print(f"[TESTER]: BasicTest1")
+    print(f"[TESTER]: Testing ...")
 
     # Start the server process
     server_process = start_server(server_path)
@@ -171,7 +170,6 @@ def multipleRequestsMinerKilledRestarted(nonces=[9999, 9999, 9999, 9999], latenc
                 print("[Active Miners] : ", active_miners)
 
     # Cleanup: Stop server and miners
-    print("[TESTER]: Stopping processes...")
     cleanup(server_process=server_process, running_client_process=running_clients, running_miner_process=running_miners)
 
     # check:
@@ -199,7 +197,7 @@ def multiplRequestsRequestsMinersKilled(nonces=[99999, 9999, 9999, 9999, 99999, 
     
     # Compile
     compile_programs()
-    print(f"[TESTER]: BasicTest1")
+    print(f"[TESTER]: Testing ...")
 
     # Start the server process
     server_process = start_server(server_path)
@@ -280,7 +278,6 @@ def multiplRequestsRequestsMinersKilled(nonces=[99999, 9999, 9999, 9999, 99999, 
                 print("[Active Miners] : ", active_miners)
 
     # Cleanup: Stop server and miners
-    print("[TESTER]: Stopping processes...")
     cleanup(server_process=server_process, running_client_process=running_clients, running_miner_process=running_miners)
 
     # check:
@@ -308,7 +305,7 @@ def killUnassignedMiner(nonces=[9999], latencies=[0,0]):
     
     # Compile
     compile_programs()
-    print(f"[TESTER]: BasicTest1")
+    print(f"[TESTER]: Testing ...")
 
     # Start the server process
     server_process = start_server(server_path)
@@ -379,7 +376,6 @@ def killUnassignedMiner(nonces=[9999], latencies=[0,0]):
                 print("[Active Miners] : ", active_miners)
 
     # Cleanup: Stop server and miners
-    print("[TESTER]: Stopping processes...")
     cleanup(server_process=server_process, running_client_process=running_clients, running_miner_process=running_miners)
 
     # check:
@@ -418,6 +414,6 @@ if __name__ == "__main__":
     # it's complicated
     # multiplRequestsRequestsMinersKilled()
     # Create a miner, kill, start a client, wait, and then start a new miner
-    # killUnassignedMiner()
+    killUnassignedMiner()
     pass
     
