@@ -174,6 +174,7 @@ func (srv *server) processor() {
 				if chunk != nil {
 					srv.scheduler.ReassignChunk(chunk, jobID)
 				}
+				srv.scheduler.ScheduleJobs(LOGF)
 
 			} else {
 

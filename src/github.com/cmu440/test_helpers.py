@@ -98,7 +98,7 @@ def start_some_processes(args:list, args_to_start:list, process_type:Literal['Cl
         if process_type == "Client":
             process = start_client(args[i])
         elif process_type == "Miner":
-            process = start_client(args[i])
+            process = start_miner(args[i])
         running_processes.append(process)
     remaining_args = [arg for i, arg in enumerate(args) if i not in args_to_start]
     return running_processes, remaining_args
