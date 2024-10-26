@@ -100,13 +100,6 @@ func main() {
 
 	LOGF := log.New(file, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
 
-	/*
-		const numArgs = 2
-		if len(os.Args) != numArgs {
-			fmt.Printf("Usage: ./%s <hostport>", os.Args[0])
-			return
-		}
-	*/
 	const numArgs = 2
 	if len(os.Args) != numArgs {
 		if numArgs == 2 {

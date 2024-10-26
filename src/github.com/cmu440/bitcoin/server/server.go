@@ -11,6 +11,19 @@ import (
 	"github.com/cmu440/lsp"
 )
 
+// LOAD BALANCING STRATEGY
+// We have a queue of jobs that need to be processed
+// and a list of idle miners that can process the jobs.
+// We first prioritize the jobs in the following order:
+// 1. Jobs that have a lower nonce
+// 2. Jobs that have less pending chunks to be processed;
+//    this is to ensure that the job is processed faster
+// 3. Jobs that have been waiting for the longest time;
+//   this is to ensure that jobs with identical requests are processed
+//	 in the order they were received
+// After prioritizing the jobs, we assign the job to the idle miner.
+// If there are no idle miners, we wait for a miner to join before reassigning the job.
+
 // server
 type server struct {
 	lspServer lsp.Server

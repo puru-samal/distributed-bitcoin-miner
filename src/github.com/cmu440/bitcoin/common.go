@@ -582,11 +582,6 @@ func (pq *jobTimeQ) RemoveMin() (*Job, error) {
 	return min, nil
 }
 
-// check if the priority queue is empty
-// func (pq *jobTimeQ) Empty() bool {
-// 	return len(pq.q) == 0
-// }
-
 // return the size of the priority queue
 func (pq *jobTimeQ) Size() int {
 	return len(pq.q)
