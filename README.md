@@ -2,6 +2,17 @@
 
 This project implements a Live Sequence Protocol (LSP) and a distributed Bitcoin miner that uses the LSP to communicate with the server and other miners.
 
+## Project Structure
+
+- `src/github.com/cmu440/`: Source code for the project.
+  - `bitcoin/`: Distributed Bitcoin miner implementation.
+  - `lsp/`: LSP implementation, helpers, data structures and tests.
+  - `lspnet/`: A wrapper around the UDP functions/methods in Go's "net" package to allow for selective dropping of packets, as well as monitoring of packet traffic. Used to test the robustness of the LSP implementation.
+  - `srunner/` and `crunner/`: Simple echo server/client programs that import the `github.com/cmu440/lsp` package. Used to test the LSP implementation.
+  - `Tester.py`: Python script for testing the Bitcoin miner implementation.
+- `bin/`: Some compiled binaries for the bitcoin client, miner and server.
+- `sh/`: Shell scripts for testing the LSP implementation.
+
 ## The Live Sequence Protocol (LSP)
 
 The Live Sequence Protocol (LSP) is a homegrown protocol for providing reliable communication with simple client and server APIs on top of the Internet UDP protocol. LSP provides features that lie somewhere between UDP and TCP, but it also has features not found in either protocol:
