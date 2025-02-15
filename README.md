@@ -1,6 +1,6 @@
 # Distributed Bitcoin Miner
 
-This project implements a Live Sequence Protocol (LSP) and a distributed Bitcoin miner that uses the LSP to communicate with the server and other miners.
+This project implements a Live Sequence Protocol (LSP) and a distributed Bitcoin miner that uses the LSP to communicate with the server and other miners. The `bitcoin` server uses a variable-priority job scheduling approach using a custom priority queue to prioritizes jobs based on a combination of Shortest Remaining Time First (SRTF) and First-Come, First-Served (FCFS) principles to minimize response time and ensure fairness. 
 
 ## Project Structure
 
